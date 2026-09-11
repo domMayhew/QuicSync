@@ -133,13 +133,19 @@ The TLS transcript binds both nonces, peer identities, selected version/capabili
 ## `transport::quic`
 
 ```rust
-struct SessionStreams { control: ControlChannel, destination_index: RecvStream, transfers: TransferStreamFactory }
-async fn connect(cfg: &SourceConfig, identity: &Identity) -> Result<Connection>;
-async fn listen(cfg: &DaemonConfig, identity: &Identity) -> Result<Incoming>;
-async fn open_session(connection: Connection) -> Result<SessionStreams>;
+struct TransportBounds { max_frame_bytes: usize, max_parallel_transfers: usize, max_inflight_bytes: usize }
+struct SourceStreams { control: ControlChannel, destination_index: IndexReader, transfers: TransferOpener }
+struct DestinationStreams { control: ControlChannel, index: IndexWriter, transfers: TransferAcceptor }
+enum Completion { Acknowledged, Unknown }
+async fn connect(cfg: &SourceConfig, identity: &Identity, cancel: CancellationToken) -> Result<Connection>;
+fn listen(cfg: &DestinationConfig, identity: &Identity, cancel: CancellationToken) -> Result<Listener>;
+impl Connection {
+  async fn open_session(&self) -> Result<SourceStreams>;
+  async fn accept_session(&self) -> Result<DestinationStreams>;
+}
 ```
 
-One long-lived bidirectional control stream carries phase changes; the destination index uses one unidirectional stream; each file uses a bidirectional transfer stream. Control remains serviceable when transfer capacity is exhausted. Stream count, pending opens, buffered bytes, and concurrent transfers are locally bounded. Loss cancels all producers/consumers through a shared cancellation token. Without `CompleteAck`, orchestration treats completion as unknown even when transport reports a clean close.
+One long-lived bidirectional control stream carries phase changes; the destination index uses one unidirectional stream; each file uses a bidirectional transfer stream. Control remains serviceable when transfer capacity is exhausted: no transfer may claim more than its share of the connection window, so saturated transfers cannot starve control. Stream count, pending opens, buffered bytes, and concurrent transfers are locally bounded; reads fill a caller-supplied buffer capped at the frame limit, so buffering never grows with tree size. The transport moves bounded byte chunks and never interprets payloads. Loss cancels all producers/consumers through a shared cancellation token, and cancellation closes the connection. Without `CompleteAck`, orchestration treats completion as unknown even when transport reports a clean close: `Completion` stays `Unknown` until a caller records an observed acknowledgment.
 
 ## Filesystem
 
@@ -287,6 +293,7 @@ Use these selections as the starting dependency set. Pin compatible minor versio
 | Area | Selection | Intended use |
 | -- | -- | -- |
 | Async runtime | `tokio` | QUIC I/O, timers, cancellation, bounded channels, and workflow concurrency. Keep hashing and blocking filesystem work off I/O tasks. |
+| Cancellation | `tokio-util` | `CancellationToken`, re-exported from `transport`, is the one shared signal that stops every producer and consumer of a session. |
 | QUIC transport | `quinn` with Rustls integration | Connections and independent streams. QuicSync’s protocol remains above Quinn so it is replaceable. |
 | TLS and identity | `rustls` and `rcgen` | TLS 1.3, mutual client certificates, self-signed setup certificates, and configured peer fingerprint checks. Keep verifier/pinning code inside `auth`. |
 | Content fingerprints | `blake3` | Stream hashes for files, indexes, policies, plans, and verification. |
