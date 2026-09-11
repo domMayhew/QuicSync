@@ -17,6 +17,7 @@ allow = [
     "ISC",
     "MIT",
     "Zlib",
+    "Unicode-3.0",
 ]
 exceptions = []
 
