@@ -15,3 +15,6 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 quicsync-core = { version = "0.1.0", path = "crates/quicsync-core" }
+# MIT; `bundled` gives Linux and macOS the same maintained SQLite build. All use is isolated
+# behind state::StateStore so the backend remains replaceable. Building requires a C compiler.
+rusqlite = { version = "0.37.0", features = ["bundled"] }

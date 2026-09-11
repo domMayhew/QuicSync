@@ -13,3 +13,4 @@ path = "src/lib.rs"
 libc = "0.2.175"
 serde = { version = "1.0.219", features = ["derive"] }
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+rusqlite.workspace = true
