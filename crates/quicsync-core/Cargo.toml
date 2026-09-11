@@ -12,15 +12,32 @@ path = "src/lib.rs"
 [dependencies]
 blake3 = "1.8.2"
 libc = "0.2.175"
+# Apache-2.0 OR MIT; QUIC connections and streams. `rustls-ring` reuses the TLS stack `auth`
+# already configures and `runtime-tokio` the runtime below; platform certificate verification is
+# excluded because peers are pinned. All use is isolated behind transport::quic.
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 ring = { version = "0.17.14", default-features = false, features = ["std"] }
 rusqlite.workspace = true
 rustls = { version = "0.23.32", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.219", features = ["derive"] }
 sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
+# MIT; the async runtime Quinn drives. `rt` spawns the connection watcher, `sync` bounds transfer
+# parallelism, `time` serves QUIC timers, and `macros` provides the `select!` that makes every
+# await cancellable. No I/O features are needed here.
+tokio = { version = "1.53.1", default-features = false, features = [
+    "macros",
+    "rt",
+    "sync",
+    "time",
+] }
+# MIT; `CancellationToken` only, for the one shared cancellation signal a session needs.
+tokio-util = { version = "0.7.19", default-features = false }
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 
 [dev-dependencies]
 tempfile = "3.22.0"
+# Test runtime: `macros` and `rt-multi-thread` drive loopback QUIC integration tests.
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", default-features = false, features = ["process"] }
