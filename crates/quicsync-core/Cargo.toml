@@ -22,8 +22,14 @@ rustls = { version = "0.23.32", default-features = false, features = ["ring", "s
 serde = { version = "1.0.219", features = ["derive"] }
 sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
 # MIT; the async runtime Quinn drives. `rt` spawns the connection watcher, `sync` bounds transfer
-# parallelism, and `time` serves QUIC timers. No I/O or macro features are needed here.
-tokio = { version = "1.53.1", default-features = false, features = ["rt", "sync", "time"] }
+# parallelism, `time` serves QUIC timers, and `macros` provides the `select!` that makes every
+# await cancellable. No I/O features are needed here.
+tokio = { version = "1.53.1", default-features = false, features = [
+    "macros",
+    "rt",
+    "sync",
+    "time",
+] }
 # MIT; `CancellationToken` only, for the one shared cancellation signal a session needs.
 tokio-util = { version = "0.7.19", default-features = false }
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
