@@ -12,6 +12,15 @@ path = "src/lib.rs"
 [dependencies]
 blake3 = "1.8.2"
 libc = "0.2.175"
-serde = { version = "1.0.219", features = ["derive"] }
-toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+ring = { version = "0.17.14", default-features = false, features = ["std"] }
 rusqlite.workspace = true
+rustls = { version = "0.23.32", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0.219", features = ["derive"] }
+sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+
+[dev-dependencies]
+tempfile = "3.22.0"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["process"] }
