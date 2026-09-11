@@ -30,8 +30,8 @@ Where this document says “descriptor-relative,” it means filesystem work sta
 
 ## Global invariants
 
- 1. **The source is authoritative only for its managed path set.** QuicSync is one-way, but it must not treat every destination path as source-owned. This prevents ordinary syncs from overwriting or deleting destination-local files the source policy excludes.
- 2. **The source policy defines that set for both machines.** `.quicsync` **and** `.git` **administrative paths are always excluded.** Destination-local Git ignore rules could make one command behave differently on each machine and turn local files into accidental deletions. A transmitted source snapshot makes the managed set deterministic; state and Git metadata must never be transfer or deletion targets.
+ 1. **The source is authoritative only for its managed path set.** QuicSync is one-way, but it must not treat every destination path as source-owned. This prevents ordinary syncs from overwriting or deleting destination-local files that Git-ignore policy excludes from the managed set.
+ 2. **For the MVP, each side evaluates Git-ignore rules during its own single filesystem traversal.** `.quicsync` **and** `.git` **administrative paths are always excluded.** Source and destination roots are expected to have equivalent ignore files and configured exclusions; if they differ, sync results are undefined until the resilience phase adds deterministic source-policy transmission. State and Git metadata must never be transfer or deletion targets.
  3. **Wire paths are relative component sequences. Absolute paths, empty components,** `.`**, and** `..` **are invalid.** A protocol path is `["src", "lib", "main.rs"]`, not an OS path string. This makes traversal attempts unrepresentable and avoids platform-specific parsing, so resolution remains beneath the configured root.
  4. **Traversal never follows symbolic links.** Following a link could read, overwrite, or delete outside the sync root, or make source and destination trees mean different things. A link is copied as a link with its raw target.
  5. **Every destination operation is directory-descriptor-relative and revalidates ancestors at use time; lexical path checks alone are insufficient.** A process can replace a checked directory with a symlink between validation and write/delete. Working from an open root directory and refusing symlink ancestors prevents that time-of-check/time-of-use escape.
@@ -109,7 +109,7 @@ enum Operation {
 }
 ```
 
-The index stream contains ordered `IndexRecord` values followed by `IndexEnd { count, manifest_digest }`. Transfer streams contain a `FileRequest`, optional rsync signature header/blocks, delta header, bounded `Copy`/`Literal` instructions, `DeltaEnd`, and `TransferAccepted`. Required unknown messages, capabilities, or enum values fail the session; optional additions are ignored only when the negotiated version permits it.
+The index stream contains ordered `IndexRecord` values followed by `IndexEnd { count, manifest_digest }`. Transfer streams contain a `FileRequest`, optional rsync signature header/blocks, delta header, bounded `Copy`/`Literal` instructions, `DeltaEnd`, and `TransferAccepted`. Policy messages are versioned data reserved for the resilience phase; the MVP does not wait for a transmitted source-policy snapshot before destination indexing. Required unknown messages, capabilities, or enum values fail the session; optional additions are ignored only when the negotiated version permits it.
 
 ### `protocol::codec`
 
@@ -154,13 +154,13 @@ One long-lived bidirectional control stream carries phase changes; the destinati
 ```rust
 struct IgnorePolicy { rules: Vec<ScopedRuleSet>, digest: Digest }
 impl IgnorePolicy {
-  fn snapshot(root: &RootHandle, cfg: &SourceConfig) -> Result<Self>;
-  fn from_wire(bundle: PolicyBundle) -> Result<Self>;
+  fn with_configured_exclusions(exclusions: &[String]) -> Result<Self>;
+  fn add_ignore_contents(&mut self, scope: Option<RelativePath>, contents: Vec<u8>) -> Result<()>;
   fn decision(&self, path: &RelativePath, kind: EntryKind) -> IgnoreDecision;
 }
 ```
 
-The source policy is authoritative. The destination does **not** evaluate its own `.gitignore` files. The source snapshots configured global excludes, worktree `.git/info/exclude` where applicable, relevant `.gitignore` files in Git precedence order, and built-in `.quicsync`/`.git` protection. It sends each policy file with scope, raw bytes, and digest before destination indexing. Matching follows Git semantics for anchoring, escaping, negation, and excluded ancestors. Ignored paths are not indexed, created, updated, or deleted on either side; ignored destination-only paths survive. Ignore files are managed unless an earlier rule excludes them. A policy mutation invalidates the source snapshot and requires reconciliation.
+Ignore policy is built as part of the same traversal that produces an index. When the scanner enters a directory, it extends the inherited matcher with that directory's `.gitignore` file before deciding which children to index or descend into. Configured exclusions are root-scoped rules. Matching follows Git semantics for anchoring, escaping, negation, and excluded ancestors through the `ignore` crate. `.quicsync` and `.git` are protected before matcher evaluation, so negation cannot re-include them. Ignored paths are not indexed, created, updated, or deleted; ignored destination-only paths survive because the destination scanner omits them before planning. Ignore files are managed unless an earlier rule excludes them. The MVP assumes source and destination ignore files match; detecting or correcting divergence is a resilience-phase concern.
 
 ### `filesystem::paths`
 
@@ -179,10 +179,10 @@ Paths are raw Unix bytes. Components are non-empty and contain neither slash nor
 fn read_entry(parent: &OwnedFd, name: &[u8]) -> Result<EntryMetadata>;
 fn digest_file(file: &File, cancel: &CancellationToken) -> Result<Digest>;
 fn matches_snapshot(before: &Snapshot, after: &Snapshot) -> bool;
-fn scan(root: RootHandle, policy: Arc<IgnorePolicy>, limits: ScanLimits, cancel: CancellationToken) -> Result<impl IndexStream>;
+fn scan(root: RootHandle, configured_exclusions: &[String], limits: ScanLimits, cancel: CancellationToken) -> Result<impl IndexStream>;
 ```
 
-Regular files open without following symlinks and are `fstat`ed before and after reading. A stable snapshot has unchanged type, device, inode, size, mtime, and ctime; equality uses BLAKE3, not timestamps alone. Symlink targets are raw bytes and revalidated with `lstat`. Mode/mtime differences produce metadata changes. Use JWalk for parallel directory enumeration, configured with an explicit raw-byte filename comparator so it emits deterministic depth-first canonical order. Use the `ignore` crate only to evaluate the already-snapshotted Git-ignore policy for each entry. Hashing may run in parallel, but worker queues and any ordering buffer remain bounded and propagate backpressure. Unstable entries or directory mutation mark the scan dirty; source orchestration reconciles before commit.
+Regular files open without following symlinks and are `fstat`ed before and after reading. A stable snapshot has unchanged type, device, inode, size, mtime, and ctime; equality uses BLAKE3, not timestamps alone. Symlink targets are raw bytes and revalidated with `lstat`. Mode/mtime differences produce metadata changes. Use JWalk for parallel directory enumeration, configured with an explicit raw-byte filename comparator so it emits deterministic depth-first canonical order. The traversal extends the current ignore matcher whenever it encounters a `.gitignore` file, then prunes ignored children before enqueueing or indexing them. Hashing may run in parallel, but worker queues and any ordering buffer remain bounded and propagate backpressure. Unstable entries or directory mutation mark the scan dirty; source orchestration reconciles before commit.
 
 ### `filesystem::staging`
 
@@ -226,9 +226,9 @@ async fn run(cfg: SourceConfig, transport: SessionStreams, state: SourceState, c
 async fn serve(auth: Authorization, transport: SessionStreams, state: StateStore, cancel: CancellationToken) -> Result<()>;
 ```
 
-Source: authenticate/negotiate; send `StartSync`; snapshot/transmit policy; scan locally while receiving destination index; plan and transfer with bounded parallelism; revalidate policy/tree; send amendment generations until two consecutive source manifests match; send stable `PlanEnd`; request commit; await acknowledgment.
+Source: authenticate/negotiate; send `StartSync`; scan locally while receiving destination index; plan and transfer with bounded parallelism; revalidate tree; send amendment generations until two consecutive source manifests match; send stable `PlanEnd`; request commit; await acknowledgment.
 
-Destination: authorize and claim session; receive/validate policy; scan under that policy; validate operation paths/order/IDs/generations/limits; generate signatures and stage content; persist journal and accepted generations; verify policy, plan, and staged entries; revalidate root/staging and commit on request; persist completion; acknowledge. Only one commit per destination root runs at once.
+Destination: authorize and claim session; scan immediately using its local ignore policy; validate operation paths/order/IDs/generations/limits; generate signatures and stage content; persist journal and accepted generations; verify plan and staged entries; revalidate root/staging and commit on request; persist completion; acknowledge. Only one commit per destination root runs at once.
 
 ### `sync::commit`
 
@@ -253,18 +253,18 @@ Errors have a stable machine code, safe peer-visible message, detailed local dia
 
 1. Source connects with mutual TLS; peers negotiate version/capabilities and bind the session transcript.
 2. Source sends `StartSync`; destination authorizes and durably claims it.
-3. Source sends its ignore-policy snapshot. Destination reconstructs it and starts a policy-filtered scan while source starts its own scan.
+3. Source and destination start policy-filtered scans immediately, each extending its matcher with `.gitignore` files encountered during its own traversal.
 4. Destination streams its canonical index; source merge-walks both indexes into a deterministic, durable operation journal.
 5. Destination supplies optional basis signatures; source transfers bounded deltas or whole files. Destination stages and verifies every generation.
-6. Source revalidates changed files and policy, sending amendments until the source manifest is stable twice consecutively.
-7. Source sends `PlanEnd`; destination verifies policy/plan digests and all staged content. Source sends `CommitRequest`.
+6. Source revalidates changed files, sending amendments until the source manifest is stable twice consecutively.
+7. Source sends `PlanEnd`; destination verifies plan digests and all staged content. Source sends `CommitRequest`.
 8. Destination revalidates descriptors, applies the ordered plan, persists completion, then sends `CompleteAck` with final manifest digest.
 
-This trace preserves the global invariants: only the source-defined managed set changes; no unverified content reaches the live root; replay cannot duplicate work; and a missing acknowledgment remains safely indeterminate.
+This trace preserves the global invariants: only the locally policy-filtered managed set changes; no unverified content reaches the live root; replay cannot duplicate work; and a missing acknowledgment remains safely indeterminate.
 
 ## TDD contract suite
 
-* Ignore fixtures match `git check-ignore`, including nested rules, negation, escaping, global excludes, and ignored destination-only paths.
+* Ignore fixtures match `git check-ignore`, including nested rules, negation, escaping, configured exclusions, traversal-time matcher extension, and ignored destination-only paths.
 * Path tests reject absolute, traversal, empty, NUL, oversized, and symlink-ancestor paths; concurrent symlink replacement cannot escape root.
 * Scanner tests prove canonical order under randomized worker completion and bounded buffering.
 * Planner property tests produce deterministic, dependency-valid plans for arbitrary trees.
@@ -297,7 +297,7 @@ Use these selections as the starting dependency set. Pin compatible minor versio
 | QUIC transport | `quinn` with Rustls integration | Connections and independent streams. QuicSync’s protocol remains above Quinn so it is replaceable. |
 | TLS and identity | `rustls` and `rcgen` | TLS 1.3, mutual client certificates, self-signed setup certificates, and configured peer fingerprint checks. Keep verifier/pinning code inside `auth`. |
 | Content fingerprints | `blake3` | Stream hashes for files, indexes, policies, plans, and verification. |
-| Git-ignore matching and traversal | `ignore` plus `jwalk` | Use `ignore` for Git-compatible matching of QuicSync's transmitted source-policy snapshot. Use JWalk for parallel, work-stealing directory enumeration. Configure JWalk with an explicit raw-byte filename comparator; never rely on default filesystem order. Its output must match QuicSync's canonical depth-first bytewise path order. |
+| Git-ignore matching and traversal | `ignore` plus `jwalk` | Use `ignore` for Git-compatible matching as the scanner discovers `.gitignore` files during its single traversal. Use JWalk for parallel, work-stealing directory enumeration. Configure JWalk with an explicit raw-byte filename comparator; never rely on default filesystem order. Its output must match QuicSync's canonical depth-first bytewise path order. |
 | Safe Unix filesystem work | `rustix`; optionally `cap-std` for non-critical helpers | Use `openat`-style directory-relative, no-follow operations for the root resolver, staging, rename, and deletion. Do not rely only on `std::fs` string paths. |
 | Delta transfer | `librsync`, behind `TransferStrategy` | Streaming signatures, deltas, and patching. QuicSync owns framing, cancellation, basis checks, staging, and final BLAKE3 verification. Keep the whole-file strategy as a fallback because librsync is a native dependency. |
 | Durable state | `rusqlite` with `bundled` | Session claims, operation journals, and completion in a known SQLite build; QuicSync configures WAL. |
