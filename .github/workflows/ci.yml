@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "ci-${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.85.1"
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal --component rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal --component clippy
+      - name: Lint workspace
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny --version 0.18.3
+      - name: Check dependency sources and bans
+        run: cargo deny check bans sources
+
+  vulnerability-policy:
+    name: Vulnerability policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit --version 0.22.1
+      - name: Audit dependencies
+        run: cargo audit --deny warnings
+
+  license-policy:
+    name: License policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny --version 0.18.3
+      - name: Check dependency licenses
+        run: cargo deny check licenses
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Build workspace
+        run: cargo build --locked --workspace --all-targets
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Test workspace
+        run: cargo test --locked --workspace --all-targets
+
+  artifacts:
+    name: Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Build release binaries
+        run: cargo build --locked --release --workspace --bins
+      - name: Prepare release artifacts
+        run: |
+          mkdir -p dist
+          install -m 0755 target/release/quicsync dist/quicsync
+          install -m 0755 target/release/quicsyncd dist/quicsyncd
+          sha256sum dist/quicsync dist/quicsyncd > dist/SHA256SUMS
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: "quicsync-${{ github.sha }}"
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Enable once fuzz targets and their scheduled execution policy are defined.
+  fuzz:
+    name: Fuzz (future)
+    if: ${{ vars.ENABLE_FUZZ == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Run fuzz targets
+        run: cargo fuzz run
+
+  # Enable targets individually as supported-platform runners become available.
+  platform:
+    name: Platform (${{ matrix.os }}) (future)
+    if: ${{ vars.ENABLE_PLATFORM == 'true' }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Build workspace
+        run: cargo build --locked --workspace --all-targets
