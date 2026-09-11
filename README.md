@@ -30,9 +30,8 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-The Rust workspace is being introduced separately. Until its manifest lands, the
-Cargo commands above are the required workflow but cannot yet run in this
-repository.
+The workspace and crate responsibilities are described in the
+[architecture documentation](docs/architecture.md).
 
 ## Contributing
 

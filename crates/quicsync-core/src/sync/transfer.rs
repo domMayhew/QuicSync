@@ -1,0 +1,1 @@
+//! Bounded file-transfer strategies.
