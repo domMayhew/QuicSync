@@ -33,6 +33,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 The workspace and crate responsibilities are described in the
 [architecture documentation](docs/architecture.md).
 
+Source and destination setup files are documented in the
+[configuration guide](docs/configuration.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and pull
