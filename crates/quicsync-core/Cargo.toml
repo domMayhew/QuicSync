@@ -11,6 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 blake3 = "1.8.2"
+# MIT OR Unlicense; Git-ignore matching for traversal-time filesystem filtering. Exact pin avoids
+# newer 0.4 releases that compile only on Rust versions newer than the workspace toolchain.
+ignore = "=0.4.24"
 libc = "0.2.175"
 # Apache-2.0 OR MIT; QUIC connections and streams. `rustls-ring` reuses the TLS stack `auth`
 # already configures and `runtime-tokio` the runtime below; platform certificate verification is
