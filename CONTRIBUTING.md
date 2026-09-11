@@ -23,11 +23,15 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets
 cargo build --workspace --all-targets
+cargo audit --deny warnings
+cargo deny check licenses
+cargo deny check bans sources
 ```
 
-The workspace manifest is tracked separately and these commands become runnable
-when it lands. If a pull request cannot run a required check, explain why in the
-pull request.
+Install `cargo-audit` and `cargo-deny` before running the dependency policy
+checks. CI runs all dependency-resolving Cargo commands with `--locked`; commit
+any resulting `Cargo.lock` change with the manifest change that caused it. If a
+pull request cannot run a required check, explain why in the pull request.
 
 ## Pull requests
 

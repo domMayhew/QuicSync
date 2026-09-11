@@ -14,4 +14,4 @@ repository = "https://github.com/domMayhew/QuicSync"
 rust-version = "1.85"
 
 [workspace.dependencies]
-quicsync-core = { path = "crates/quicsync-core" }
+quicsync-core = { version = "0.1.0", path = "crates/quicsync-core" }
