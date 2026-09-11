@@ -1,0 +1,10 @@
+# The default owner reviews all repository changes.
+* @domMayhew
+
+# Governance changes require explicit maintainer review.
+/.github/ @domMayhew
+/CONTRIBUTING.md @domMayhew
+/LICENSE @domMayhew
+/README.md @domMayhew
+/SECURITY.md @domMayhew
+/docs/ @domMayhew
