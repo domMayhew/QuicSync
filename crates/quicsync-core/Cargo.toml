@@ -40,4 +40,7 @@ tempfile = "3.22.0"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1.4", default-features = false, features = ["process"] }
+# Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; `process` reads the effective user for
+# ownership checks and `fs` provides the `openat`-style no-follow calls that keep path resolution
+# beneath a held root descriptor. All filesystem use is isolated behind filesystem::paths.
+rustix = { version = "1.1.4", default-features = false, features = ["fs", "process", "std"] }
