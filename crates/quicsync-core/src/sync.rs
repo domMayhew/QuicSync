@@ -1,1 +1,0 @@
-//! Transport-independent synchronization orchestration.

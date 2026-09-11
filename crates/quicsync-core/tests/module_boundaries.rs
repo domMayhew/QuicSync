@@ -1,6 +1,11 @@
 #[allow(unused_imports)]
 use quicsync_core::{
-    config as _, error as _, filesystem as _, protocol as _, state as _, sync as _, transport as _,
+    auth as _, config as _, error as _,
+    filesystem::{ignore as _, metadata as _, paths as _, scan as _, staging as _},
+    protocol::{codec as _, messages as _, session as _},
+    state as _,
+    sync::{commit as _, destination as _, planner as _, source as _, transfer as _},
+    transport::quic as _,
 };
 
 #[test]

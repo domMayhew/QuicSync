@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "crates/quicsync-core",
-    "crates/quicsync",
-    "crates/quicsyncd",
+    "apps/quicsync",
+    "apps/quicsyncd",
 ]
 resolver = "3"
 
