@@ -30,12 +30,14 @@ Where this document says “descriptor-relative,” it means filesystem work sta
 
 ## Global invariants
 
+The MVP is not a production-readiness milestone. It is a working implementation for comparing QuicSync's likely performance shape against rsync under known, normal conditions: configured peers are running, the network is stable, both roots use equivalent ignore policy, and the source tree does not intentionally change during the sync. Resilience, recovery, platform edge cases, and strategy tuning are later milestones unless a ticket explicitly pulls a narrow piece into MVP.
+
  1. **The source is authoritative only for its managed path set.** QuicSync is one-way, but it must not treat every destination path as source-owned. This prevents ordinary syncs from overwriting or deleting destination-local files that Git-ignore policy excludes from the managed set.
  2. **For the MVP, each side evaluates Git-ignore rules during its own single filesystem traversal.** `.quicsync` **and** `.git` **administrative paths are always excluded.** Source and destination roots are expected to have equivalent ignore files and configured exclusions; if they differ, sync results are undefined until the resilience phase adds deterministic source-policy transmission. State and Git metadata must never be transfer or deletion targets.
  3. **Wire paths are relative component sequences. Absolute paths, empty components,** `.`**, and** `..` **are invalid.** A protocol path is `["src", "lib", "main.rs"]`, not an OS path string. This makes traversal attempts unrepresentable and avoids platform-specific parsing, so resolution remains beneath the configured root.
  4. **Traversal never follows symbolic links.** Following a link could read, overwrite, or delete outside the sync root, or make source and destination trees mean different things. A link is copied as a link with its raw target.
  5. **Every destination operation is directory-descriptor-relative and revalidates ancestors at use time; lexical path checks alone are insufficient.** A process can replace a checked directory with a symlink between validation and write/delete. Working from an open root directory and refusing symlink ancestors prevents that time-of-check/time-of-use escape.
- 6. **Incoming files are reconstructed and cryptographically verified in session staging before the live tree changes.** Deltas, network faults, implementation defects, or a changed basis must not put partial or incorrect bytes in the live tree. Staging allows exact size/digest validation and atomic per-file installation.
+ 6. **Incoming files are reconstructed and cryptographically verified in session staging before the live tree changes.** Delta-transfer faults, network faults, implementation defects, or a changed basis must not put partial or incorrect bytes in the live tree. Staging allows exact size/digest validation and atomic per-file installation.
  7. **A completion acknowledgment means the complete accepted plan was committed and durable completion state recorded.** The source needs one unambiguous success signal. Durable state before acknowledgment lets a retry query a lost response rather than rerun the session.
  8. **A failed commit can leave a mixed-version tree; the next sync must converge it. Transaction-wide rollback is not an MVP guarantee.** Whole-tree atomic replacement conflicts with the speed and minimal-stack goals. This avoids a false transaction promise while requiring a later authoritative sync to repair all partial operations.
  9. **Memory is bounded independently of tree size: indexes, signatures, plans, and content stream or spill to session state.** Large codebases and branch changes are target workloads. Accumulating any of these structures in RAM would fail under exactly those workloads; backpressure also prevents a fast producer from overwhelming its peer.
@@ -145,7 +147,7 @@ impl Connection {
 }
 ```
 
-One long-lived bidirectional control stream carries phase changes; the destination index uses one unidirectional stream; each file uses a bidirectional transfer stream. Control remains serviceable when transfer capacity is exhausted: no transfer may claim more than its share of the connection window, so saturated transfers cannot starve control. Stream count, pending opens, buffered bytes, and concurrent transfers are locally bounded; reads fill a caller-supplied buffer capped at the frame limit, so buffering never grows with tree size. The transport moves bounded byte chunks and never interprets payloads. Loss cancels all producers/consumers through a shared cancellation token, and cancellation closes the connection. Without `CompleteAck`, orchestration treats completion as unknown even when transport reports a clean close: `Completion` stays `Unknown` until a caller records an observed acknowledgment.
+One long-lived bidirectional control stream carries phase changes; the destination index uses one unidirectional stream; each file uses a bidirectional transfer stream. For the MVP, the transport must let configured peers exchange control messages, indexes, and file data for a stable sync. Saturation behavior, shared cancellation, strict bounded-resource guarantees, and ambiguous-acknowledgment recovery are resilience or hardening concerns.
 
 ## Filesystem
 
@@ -182,7 +184,7 @@ fn matches_snapshot(before: &Snapshot, after: &Snapshot) -> bool;
 fn scan(root: RootHandle, configured_exclusions: &[String], limits: ScanLimits, cancel: CancellationToken) -> Result<impl IndexStream>;
 ```
 
-Regular files open without following symlinks and are `fstat`ed before and after reading. A stable snapshot has unchanged type, device, inode, size, mtime, and ctime; equality uses BLAKE3, not timestamps alone. Symlink targets are raw bytes and revalidated with `lstat`. Mode/mtime differences produce metadata changes. Use JWalk for parallel directory enumeration, configured with an explicit raw-byte filename comparator so it emits deterministic depth-first canonical order. The traversal extends the current ignore matcher whenever it encounters a `.gitignore` file, then prunes ignored children before enqueueing or indexing them. Hashing may run in parallel, but worker queues and any ordering buffer remain bounded and propagate backpressure. Unstable entries or directory mutation mark the scan dirty; source orchestration reconciles before commit.
+Regular files open without following symlinks and are hashed for transfer comparison. Symlink targets are raw bytes. Mode/mtime differences produce metadata changes. The traversal extends the current ignore matcher whenever it encounters a `.gitignore` file, then prunes ignored children before enqueueing or indexing them. For the MVP, scanning a directory that does not change during traversal must produce the metadata needed for diffing and transfer. Parallel traversal, strict canonical raw-byte ordering, bounded queues, non-UTF-8 coverage, and changed-file reconciliation are later hardening unless they are needed to make performance benchmarking representative.
 
 ### `filesystem::staging`
 
@@ -217,7 +219,7 @@ trait TransferStrategy {
 }
 ```
 
-The destination uses its current regular file, when suitable, as an optional basis and streams negotiated fixed-block rolling/strong signatures. The source emits bounded copy/literal instructions from a stable file descriptor. Missing, unstable, wrong-type, or unsuitable bases fall back to whole-file literals. Copy ranges must fit the declared basis; reconstructed size and BLAKE3 must equal the indexed source record. Streams are incremental and bounded. After transfer the source rechecks file and path identity; changed content rescans and retransfers with a higher generation.
+For the MVP, regular-file content always uses the delta-transfer protocol. The destination uses its current regular file, when suitable, as an optional basis and streams fixed-block rolling/strong signatures; otherwise it reports no basis and the same delta stream carries literal content. The source emits copy/literal instructions from the indexed source bytes. Copy ranges must fit the declared basis; reconstructed size and BLAKE3 must equal the indexed source record. Symlinks are not file transfers: their raw target bytes are carried in the index/operation record and staged directly. Choosing between delta and whole-file transfer based on file size, round-trip time, throughput, or CPU cost is an optimization-phase concern.
 
 ### `sync::source` and `sync::destination`
 
@@ -226,9 +228,9 @@ async fn run(cfg: SourceConfig, transport: SessionStreams, state: SourceState, c
 async fn serve(auth: Authorization, transport: SessionStreams, state: StateStore, cancel: CancellationToken) -> Result<()>;
 ```
 
-Source: authenticate/negotiate; send `StartSync`; scan locally while receiving destination index; plan and transfer with bounded parallelism; revalidate tree; send amendment generations until two consecutive source manifests match; send stable `PlanEnd`; request commit; await acknowledgment.
+Source: authenticate/negotiate; send `StartSync`; scan locally while receiving destination index; plan and transfer with bounded parallelism; request commit; report completion. If a source file changes after it is indexed or while it is read, the MVP may transfer the earlier observed bytes; detecting or reconciling source changes is a resilience concern.
 
-Destination: authorize and claim session; scan immediately using its local ignore policy; validate operation paths/order/IDs/generations/limits; generate signatures and stage content; persist journal and accepted generations; verify plan and staged entries; revalidate root/staging and commit on request; persist completion; acknowledge. Only one commit per destination root runs at once.
+Destination: authorize the configured peer; scan immediately using its local ignore policy; validate operation paths and limits; generate signatures and stage content; verify the accepted plan and staged entries; commit on request; report completion. Replay/restart handling, durable status queries, cancellation workflows, and corruption-recovery workflows are resilience concerns.
 
 ### `sync::commit`
 
@@ -252,12 +254,12 @@ Errors have a stable machine code, safe peer-visible message, detailed local dia
 ## End-to-end sync trace
 
 1. Source connects with mutual TLS; peers negotiate version/capabilities and bind the session transcript.
-2. Source sends `StartSync`; destination authorizes and durably claims it.
+2. Source sends `StartSync`; destination authorizes the configured peer and root.
 3. Source and destination start policy-filtered scans immediately, each extending its matcher with `.gitignore` files encountered during its own traversal.
-4. Destination streams its canonical index; source merge-walks both indexes into a deterministic, durable operation journal.
-5. Destination supplies optional basis signatures; source transfers bounded deltas or whole files. Destination stages and verifies every generation.
-6. Source revalidates changed files, sending amendments until the source manifest is stable twice consecutively.
-7. Source sends `PlanEnd`; destination verifies plan digests and all staged content. Source sends `CommitRequest`.
+4. Destination streams its index; source merge-walks both indexes into a deterministic operation plan.
+5. Destination supplies optional basis signatures; source transfers regular-file content through the delta protocol. Destination stages and verifies every generation.
+6. Source sends `PlanEnd`; destination verifies the plan and all staged content. Source sends `CommitRequest`.
+7. If the source changed during the sync, MVP results are unspecified; a later sync or resilience work handles convergence.
 8. Destination revalidates descriptors, applies the ordered plan, persists completion, then sends `CompleteAck` with final manifest digest.
 
 This trace preserves the global invariants: only the locally policy-filtered managed set changes; no unverified content reaches the live root; replay cannot duplicate work; and a missing acknowledgment remains safely indeterminate.
@@ -266,23 +268,25 @@ This trace preserves the global invariants: only the locally policy-filtered man
 
 * Ignore fixtures match `git check-ignore`, including nested rules, negation, escaping, configured exclusions, traversal-time matcher extension, and ignored destination-only paths.
 * Path tests reject absolute, traversal, empty, NUL, oversized, and symlink-ancestor paths; concurrent symlink replacement cannot escape root.
-* Scanner tests prove canonical order under randomized worker completion and bounded buffering.
+* Scanner tests cover stable trees and ignore filtering; randomized worker completion, strict canonical raw-byte ordering, bounded buffering, and changed-file behavior belong to later hardening unless needed for representative benchmark results.
 * Planner property tests produce deterministic, dependency-valid plans for arbitrary trees.
 * Codec golden vectors, malformed-frame fuzzing, and session-state tests preserve wire and ordering contracts.
-* Transfer property tests reconstruct random source bytes from random bases; corrupt signatures/deltas/staging fail verification.
-* Integration tests cover empty/full trees, metadata-only updates, symlinks, type replacements, nested deletions, source mutation, disconnect before/during commit, replay, lost acknowledgment, backpressure, case/normalization collisions, non-UTF-8 names, modes, timestamp limits, and unsupported filesystem objects.
+* Transfer property tests reconstruct random source bytes from random bases; corrupt signatures, delta instructions, and staged content fail verification.
+* MVP integration tests cover empty/full trees, metadata-only updates, symlinks, type replacements, deletions, and delta transfer over loopback. Source mutation, disconnect before/during commit, replay, lost acknowledgment, backpressure, case/normalization collisions, non-UTF-8 names, timestamp limits, and unsupported filesystem objects belong to Resilience or platform hardening.
 
 ### Integration test plan
 
-The existing suite is a contract checklist; this section defines the environments and release coverage. Benchmarks are intentionally out of scope.
+The existing suite is a contract checklist; this section defines the environments and release coverage. Benchmarks are tracked separately, but the MVP should preserve enough streaming/indexing shape that benchmarking can assess whether QuicSync is likely to outperform rsync.
 
 **Routine integration environment.** Run the real source CLI/core and destination daemon against two independent temporary roots and a loopback QUIC endpoint. Each root has separate configuration, identity, state, staging, and Git fixtures; tests must not share filesystem handles or state. This exercises production serialization, TLS, QUIC streams, staging, and commit behavior without requiring two physical machines.
 
-**Fault injection.** Use a controllable local transport harness or proxy for deterministic blocked readers, stream resets, connection loss, dropped acknowledgment, restart, and constrained stream/inflight limits. Mocks are appropriate for unit boundaries, but end-to-end tests must use the production QUIC transport and filesystem implementation.
+**Fault injection.** Resilience-phase tests use a controllable local transport harness or proxy for deterministic blocked readers, stream resets, connection loss, dropped acknowledgment, restart, and constrained stream/inflight limits. Mocks are appropriate for unit boundaries, but end-to-end tests should still cover the production QUIC transport and filesystem implementation.
 
-**Platform interoperability.** Separate physical machines are not needed for ordinary CI. Before release, and after filesystem/protocol/transport/auth/commit changes, run Linux→Linux, macOS→macOS, Linux→macOS, and macOS→Linux on real filesystems. Include case-sensitive and normal case-insensitive macOS volumes where available. This covers naming/normalization, permissions, and system-call behavior a single-host suite cannot reproduce.
+**Platform interoperability.** Separate physical machines are not needed for ordinary CI or the MVP. Before a real release, and after filesystem/protocol/transport/auth/commit changes, run Linux→Linux, macOS→macOS, Linux→macOS, and macOS→Linux on real filesystems. Include case-sensitive and normal case-insensitive macOS volumes where available. This covers naming/normalization, permissions, and system-call behavior a single-host suite cannot reproduce.
 
-**Required scenarios.** Test convergence for empty/full trees, metadata-only changes, symlinks, type replacements, deletions, and whole-file/delta transfers; source mutation during scan/policy/transfer; interruption before and during commit; replay and lost acknowledgment; malformed or corrupt policy/index/plan/signature/delta/staging data; resource backpressure; and unsupported/colliding destination paths. Preserve a regression fixture for every correctness or security defect.
+**MVP scenarios.** Test convergence for empty/full stable trees, metadata-only changes, symlinks, type replacements, deletions, and delta transfers. Preserve a regression fixture for correctness or security defects found while building the MVP.
+
+**Later scenarios.** Source mutation during scan/policy/transfer, interruption before and during commit, replay and lost acknowledgment, malformed or corrupt policy/index/plan/signature/delta/staging data, resource backpressure, and unsupported/colliding destination paths belong to Resilience or platform hardening.
 
 ### Dependency decisions
 
@@ -299,7 +303,7 @@ Use these selections as the starting dependency set. Pin compatible minor versio
 | Content fingerprints | `blake3` | Stream hashes for files, indexes, policies, plans, and verification. |
 | Git-ignore matching and traversal | `ignore` plus `jwalk` | Use `ignore` for Git-compatible matching as the scanner discovers `.gitignore` files during its single traversal. Use JWalk for parallel, work-stealing directory enumeration. Configure JWalk with an explicit raw-byte filename comparator; never rely on default filesystem order. Its output must match QuicSync's canonical depth-first bytewise path order. |
 | Safe Unix filesystem work | `rustix`; optionally `cap-std` for non-critical helpers | Use `openat`-style directory-relative, no-follow operations for the root resolver, staging, rename, and deletion. Do not rely only on `std::fs` string paths. |
-| Delta transfer | `librsync`, behind `TransferStrategy` | Streaming signatures, deltas, and patching. QuicSync owns framing, cancellation, basis checks, staging, and final BLAKE3 verification. Keep the whole-file strategy as a fallback because librsync is a native dependency. |
+| Delta transfer | `librsync`, behind `TransferStrategy` | Streaming signatures, deltas, and patching for regular files. QuicSync owns framing, cancellation, basis checks, staging, and final BLAKE3 verification. Strategy selection between delta and whole-file transfer belongs to the optimization phase, not the MVP. |
 | Durable state | `rusqlite` with `bundled` | Session claims, operation journals, and completion in a known SQLite build; QuicSync configures WAL. |
 | Wire buffers/format | `bytes` and a small hand-written codec | Bounded buffers while QuicSync explicitly defines canonical framing, versions, limits, and malformed-input behavior. |
 | Test support | `tempfile`, `proptest`, `cargo-fuzz` with `libfuzzer-sys` | Isolated roots, generated tree/plan/delta cases, and fuzzing. Build the controllable network-fault proxy as test-only QuicSync code. |
