@@ -20,7 +20,7 @@ allow = [
     "Unicode-3.0",
 ]
 # Maintainer approved bundled librsync on 2026-09-12; keep the exception scoped.
-exceptions = [{ name = "librsync-sys", allow = ["LGPL-2.1-or-later"] }]
+exceptions = [{ name = "librsync-sys", allow = ["LGPL-2.1"] }]
 
 [bans]
 multiple-versions = "warn"
