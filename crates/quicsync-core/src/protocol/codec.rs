@@ -5,8 +5,8 @@ use std::{fmt, marker::PhantomData};
 use crate::{
     config::Limits,
     protocol::messages::{
-        CURRENT_VERSION, Control, FileBasis, FileTransfer, IndexMessage, Operation,
-        ProtocolVersion, WireErrorCode, WireFailure,
+        CURRENT_VERSION, Control, FileTransfer, IndexMessage, Operation, ProtocolVersion,
+        WireErrorCode, WireFailure,
     },
     types::{Digest, EntryKind, EntryMetadata, IndexRecord, OperationId, Phase, RelativePath},
 };
@@ -671,60 +671,28 @@ impl WireMessage for FileTransfer {
     fn kind(&self) -> u8 {
         match self {
             Self::FileRequest { .. } => 1,
-            Self::SignatureHeader { .. } => 2,
-            Self::SignatureBlock { .. } => 3,
-            Self::DeltaHeader => 4,
-            Self::Copy { .. } => 5,
-            Self::Literal(_) => 6,
-            Self::DeltaEnd => 7,
-            Self::TransferAccepted { .. } => 8,
-            Self::Failure(_) => 9,
+            Self::Signature(_) => 2,
+            Self::SignatureEnd => 3,
+            Self::Delta(_) => 4,
+            Self::DeltaEnd => 5,
+            Self::TransferAccepted { .. } => 6,
         }
     }
     fn encode_fields(&self, writer: &mut Writer<'_>) -> Result<(), CodecError> {
         match self {
-            Self::FileRequest { id, path, basis } => {
+            Self::FileRequest { id, path } => {
                 writer.u64(id.get());
-                writer.path(path)?;
-                writer.optional(*basis, |writer, basis| {
-                    writer.u64(basis.size);
-                    Ok(())
-                })
+                writer.path(path)
             }
-            Self::SignatureHeader {
-                basis_size,
-                block_size,
-                block_count,
-            } => {
-                writer.u64(*basis_size);
-                writer.u32(*block_size);
-                writer.u32(*block_count);
-                Ok(())
-            }
-            Self::SignatureBlock { weak, strong } => {
-                writer.u32(*weak);
-                writer.digest(*strong);
-                Ok(())
-            }
-            Self::DeltaHeader => Ok(()),
-            Self::Copy {
-                basis_offset,
-                length,
-            } => {
-                writer.u64(*basis_offset);
-                writer.u32(*length);
-                Ok(())
-            }
-            Self::Literal(bytes) => {
+            Self::Signature(bytes) | Self::Delta(bytes) => {
                 writer.bytes(bytes);
                 Ok(())
             }
-            Self::DeltaEnd => Ok(()),
+            Self::SignatureEnd | Self::DeltaEnd => Ok(()),
             Self::TransferAccepted { id } => {
                 writer.u64(id.get());
                 Ok(())
             }
-            Self::Failure(failure) => writer.failure(failure),
         }
     }
     fn decode_fields(kind: u8, reader: &mut Reader<'_>) -> Result<Self, CodecError> {
@@ -732,32 +700,14 @@ impl WireMessage for FileTransfer {
             1 => Ok(Self::FileRequest {
                 id: OperationId::new(reader.u64()?),
                 path: reader.path()?,
-                basis: reader.optional(|reader| {
-                    Ok(FileBasis {
-                        size: reader.u64()?,
-                    })
-                })?,
             }),
-            2 => Ok(Self::SignatureHeader {
-                basis_size: reader.u64()?,
-                block_size: reader.u32()?,
-                block_count: reader.u32()?,
-            }),
-            3 => Ok(Self::SignatureBlock {
-                weak: reader.u32()?,
-                strong: reader.digest()?,
-            }),
-            4 => Ok(Self::DeltaHeader),
-            5 => Ok(Self::Copy {
-                basis_offset: reader.u64()?,
-                length: reader.u32()?,
-            }),
-            6 => Ok(Self::Literal(reader.bytes()?)),
-            7 => Ok(Self::DeltaEnd),
-            8 => Ok(Self::TransferAccepted {
+            2 => Ok(Self::Signature(reader.bytes()?)),
+            3 => Ok(Self::SignatureEnd),
+            4 => Ok(Self::Delta(reader.bytes()?)),
+            5 => Ok(Self::DeltaEnd),
+            6 => Ok(Self::TransferAccepted {
                 id: OperationId::new(reader.u64()?),
             }),
-            9 => Ok(Self::Failure(reader.failure()?)),
             _ => Err(CodecError::UnknownMessageKind(kind)),
         }
     }

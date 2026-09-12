@@ -327,6 +327,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "librsync"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1a14b4d479b7f154a83aa4f828109f105328704bc3497ce0364cfe13ddfbd33"
+dependencies = [
+ "libc",
+ "librsync-sys",
+]
+
+[[package]]
+name = "librsync-sys"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bf565857135e25829345b68a02e190754ce240d59f6311d8801a79d8c15a163"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -396,6 +416,7 @@ dependencies = [
  "blake3",
  "ignore",
  "libc",
+ "librsync",
  "quinn",
  "ring",
  "rustix",

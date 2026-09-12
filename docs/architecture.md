@@ -117,7 +117,10 @@ directory dependencies; unrelated file transfers must keep progressing.
 
 ### Delta transfer and staging
 
-Use an established rsync-style delta library for every regular-file transfer.
+HME-435 uses librsync 0.2.6 (default features disabled) for every regular-file transfer.
+The maintainer approved the bundled LGPL-2.1 C implementation. Signature/delta
+bytes use the library format inside bounded QUIC frames; parsing and matching
+stay in librsync. Blocking workers connect to the network through bounded channels.
 An absent basis produces an all-literal delta through the same path. Symlinks
 use target metadata. Whole-file strategy selection, file-size cutoffs, RTT or
 throughput probes belong only in Optimizations.
@@ -154,7 +157,7 @@ Conceptual messages:
 ```text
 Control: StartSync(root), Operation(op), PlanEnd, CompleteAck, Failure(error)
 Index:   Record(record), End
-File:    Request, SignatureHeader/Blocks, DeltaHeader, Copy/Literal, DeltaEnd
+File:    Request, Signature(bytes), SignatureEnd, Delta(bytes), DeltaEnd, TransferAccepted
 ```
 
 `PlanEnd` means only that no more operations follow. `Index::End` means only

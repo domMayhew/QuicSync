@@ -15,6 +15,9 @@ blake3 = "1.8.2"
 # newer 0.4 releases that compile only on Rust versions newer than the workspace toolchain.
 ignore = "=0.4.24"
 libc = "0.2.175"
+# MIT/Apache Rust wrapper; bundled LGPL-2.1 C engine approved by the maintainer.
+# Streaming signature/delta/patch adapters; optional logging disabled.
+librsync = { version = "0.2.6", default-features = false }
 # Apache-2.0 OR MIT; QUIC connections and streams. `rustls-ring` reuses the TLS stack `auth`
 # already configures and `runtime-tokio` the runtime below; platform certificate verification is
 # excluded because peers are pinned. All use is isolated behind transport::quic.
