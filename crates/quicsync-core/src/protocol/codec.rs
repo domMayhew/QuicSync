@@ -5,14 +5,10 @@ use std::{fmt, marker::PhantomData};
 use crate::{
     config::Limits,
     protocol::messages::{
-        CURRENT_VERSION, CancelReason, Capability, Control, FileBasis, FileTransfer, IndexMessage,
-        Operation, PolicyRuleFile, ProtocolVersion, Requirement, SessionStatus, WireErrorCode,
-        WireFailure, WireRetry,
+        CURRENT_VERSION, Control, FileBasis, FileTransfer, IndexMessage, Operation,
+        ProtocolVersion, WireErrorCode, WireFailure,
     },
-    types::{
-        Digest, EntryKind, EntryMetadata, Generation, IndexRecord, OperationId, Phase,
-        RelativePath, SessionId,
-    },
+    types::{Digest, EntryKind, EntryMetadata, IndexRecord, OperationId, Phase, RelativePath},
 };
 
 const MAX_VARINT_BYTES: usize = 10;
@@ -358,14 +354,6 @@ impl Writer<'_> {
         self.raw(value.as_bytes());
     }
 
-    fn collection_len(&mut self, length: usize) -> Result<(), CodecError> {
-        if length > self.limits.max_collection_items {
-            return Err(CodecError::LimitExceeded("collection items"));
-        }
-        self.length(length);
-        Ok(())
-    }
-
     fn path(&mut self, path: &RelativePath) -> Result<(), CodecError> {
         if path.components().len() > self.limits.max_components {
             return Err(CodecError::LimitExceeded("path components"));
@@ -431,21 +419,9 @@ impl Writer<'_> {
 
     fn operation(&mut self, value: &Operation) -> Result<(), CodecError> {
         match value {
-            Operation::UpsertDirectory {
-                id,
-                generation,
-                record,
-            } => self.upsert(1, *id, *generation, record),
-            Operation::UpsertFile {
-                id,
-                generation,
-                record,
-            } => self.upsert(2, *id, *generation, record),
-            Operation::UpsertSymlink {
-                id,
-                generation,
-                record,
-            } => self.upsert(3, *id, *generation, record),
+            Operation::UpsertDirectory { id, record } => self.upsert(1, *id, record),
+            Operation::UpsertFile { id, record } => self.upsert(2, *id, record),
+            Operation::UpsertSymlink { id, record } => self.upsert(3, *id, record),
             Operation::Delete {
                 id,
                 path,
@@ -460,23 +436,15 @@ impl Writer<'_> {
         }
     }
 
-    fn upsert(
-        &mut self,
-        tag: u8,
-        id: OperationId,
-        generation: Generation,
-        record: &IndexRecord,
-    ) -> Result<(), CodecError> {
+    fn upsert(&mut self, tag: u8, id: OperationId, record: &IndexRecord) -> Result<(), CodecError> {
         self.u8(tag);
         self.u64(id.get());
-        self.u32(generation.get());
         self.record(record)
     }
 
     fn failure(&mut self, value: &WireFailure) -> Result<(), CodecError> {
         self.u16(value.code as u16);
         self.string(&value.message);
-        self.u8(retry_tag(value.retry));
         self.u8(phase_tag(value.phase));
         self.optional(value.operation_id, |writer, id| {
             writer.u64(id.get());
@@ -554,9 +522,6 @@ impl<'a> Reader<'a> {
     fn digest(&mut self) -> Result<Digest, CodecError> {
         Ok(Digest::from_bytes(self.array()?))
     }
-    fn collection_len(&mut self) -> Result<usize, CodecError> {
-        self.bounded_length(self.limits.max_collection_items, "collection items")
-    }
     fn optional<T>(
         &mut self,
         read: impl FnOnce(&mut Self) -> Result<T, CodecError>,
@@ -610,24 +575,11 @@ impl<'a> Reader<'a> {
         let id = OperationId::new(self.u64()?);
         match tag {
             1..=3 => {
-                let generation = Generation::new(self.u32()?);
                 let record = self.record()?;
                 Ok(match tag {
-                    1 => Operation::UpsertDirectory {
-                        id,
-                        generation,
-                        record,
-                    },
-                    2 => Operation::UpsertFile {
-                        id,
-                        generation,
-                        record,
-                    },
-                    _ => Operation::UpsertSymlink {
-                        id,
-                        generation,
-                        record,
-                    },
+                    1 => Operation::UpsertDirectory { id, record },
+                    2 => Operation::UpsertFile { id, record },
+                    _ => Operation::UpsertSymlink { id, record },
                 })
             }
             4 => Ok(Operation::Delete {
@@ -642,7 +594,6 @@ impl<'a> Reader<'a> {
         Ok(WireFailure {
             code: wire_error(self.u16()?)?,
             message: self.string()?,
-            retry: retry(self.u8()?)?,
             phase: phase(self.u8()?)?,
             operation_id: self.optional(|reader| Ok(OperationId::new(reader.u64()?)))?,
             path: self.optional(Self::path)?,
@@ -660,102 +611,34 @@ impl<'a> Reader<'a> {
 impl WireMessage for Control {
     fn kind(&self) -> u8 {
         match self {
-            Self::ClientHello { .. } => 1,
-            Self::ServerHello { .. } => 2,
             Self::StartSync { .. } => 3,
-            Self::PolicyBegin => 4,
-            Self::PolicyRuleFile(_) => 5,
-            Self::PolicyEnd { .. } => 6,
             Self::StartAccepted => 7,
-            Self::StartStatus(_) => 8,
-            Self::PlanBegin => 9,
             Self::Operation(_) => 10,
             Self::PlanEnd => 11,
-            Self::CommitRequest => 12,
             Self::CompleteAck => 13,
-            Self::Cancel { .. } => 14,
             Self::Failure(_) => 15,
         }
     }
-
     fn encode_fields(&self, writer: &mut Writer<'_>) -> Result<(), CodecError> {
         match self {
-            Self::ClientHello {
-                versions,
-                capabilities,
-                nonce,
-            } => {
-                write_versions(writer, versions)?;
-                write_capabilities(writer, capabilities)?;
-                writer.raw(nonce);
-                Ok(())
-            }
-            Self::ServerHello {
-                version,
-                capabilities,
-                nonce,
-            } => {
-                writer.u16(version.get());
-                write_capabilities(writer, capabilities)?;
-                writer.raw(nonce);
-                Ok(())
-            }
-            Self::StartSync {
-                session_id,
-                root_id,
-            } => {
-                writer.raw(session_id.as_bytes());
+            Self::StartSync { root_id } => {
                 writer.string(root_id);
                 Ok(())
             }
-            Self::PolicyBegin | Self::StartAccepted | Self::PlanBegin => Ok(()),
-            Self::PolicyRuleFile(rule) => write_rule(writer, rule),
-            Self::PolicyEnd { policy_digest } => {
-                writer.digest(*policy_digest);
-                Ok(())
-            }
-            Self::StartStatus(status) => write_status(writer, status),
+            Self::StartAccepted | Self::PlanEnd | Self::CompleteAck => Ok(()),
             Self::Operation(operation) => writer.operation(operation),
-            Self::PlanEnd | Self::CommitRequest | Self::CompleteAck => Ok(()),
-            Self::Cancel { reason } => {
-                writer.u8(cancel_tag(*reason));
-                Ok(())
-            }
             Self::Failure(failure) => writer.failure(failure),
         }
     }
-
     fn decode_fields(kind: u8, reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         match kind {
-            1 => Ok(Self::ClientHello {
-                versions: read_versions(reader)?,
-                capabilities: read_capabilities(reader)?,
-                nonce: reader.array()?,
-            }),
-            2 => Ok(Self::ServerHello {
-                version: ProtocolVersion::new(reader.u16()?),
-                capabilities: read_capabilities(reader)?,
-                nonce: reader.array()?,
-            }),
             3 => Ok(Self::StartSync {
-                session_id: SessionId::from_bytes(reader.array()?),
                 root_id: reader.string()?,
             }),
-            4 => Ok(Self::PolicyBegin),
-            5 => Ok(Self::PolicyRuleFile(read_rule(reader)?)),
-            6 => Ok(Self::PolicyEnd {
-                policy_digest: reader.digest()?,
-            }),
             7 => Ok(Self::StartAccepted),
-            8 => Ok(Self::StartStatus(read_status(reader)?)),
-            9 => Ok(Self::PlanBegin),
             10 => Ok(Self::Operation(reader.operation()?)),
             11 => Ok(Self::PlanEnd),
-            12 => Ok(Self::CommitRequest),
             13 => Ok(Self::CompleteAck),
-            14 => Ok(Self::Cancel {
-                reason: cancel(reader.u8()?)?,
-            }),
             15 => Ok(Self::Failure(reader.failure()?)),
             _ => Err(CodecError::UnknownMessageKind(kind)),
         }
@@ -790,7 +673,7 @@ impl WireMessage for FileTransfer {
             Self::FileRequest { .. } => 1,
             Self::SignatureHeader { .. } => 2,
             Self::SignatureBlock { .. } => 3,
-            Self::DeltaHeader { .. } => 4,
+            Self::DeltaHeader => 4,
             Self::Copy { .. } => 5,
             Self::Literal(_) => 6,
             Self::DeltaEnd => 7,
@@ -800,18 +683,11 @@ impl WireMessage for FileTransfer {
     }
     fn encode_fields(&self, writer: &mut Writer<'_>) -> Result<(), CodecError> {
         match self {
-            Self::FileRequest {
-                id,
-                generation,
-                path,
-                basis,
-            } => {
+            Self::FileRequest { id, path, basis } => {
                 writer.u64(id.get());
-                writer.u32(generation.get());
                 writer.path(path)?;
                 writer.optional(*basis, |writer, basis| {
                     writer.u64(basis.size);
-                    writer.digest(basis.digest);
                     Ok(())
                 })
             }
@@ -830,14 +706,7 @@ impl WireMessage for FileTransfer {
                 writer.digest(*strong);
                 Ok(())
             }
-            Self::DeltaHeader {
-                result_size,
-                result_digest,
-            } => {
-                writer.u64(*result_size);
-                writer.digest(*result_digest);
-                Ok(())
-            }
+            Self::DeltaHeader => Ok(()),
             Self::Copy {
                 basis_offset,
                 length,
@@ -851,14 +720,8 @@ impl WireMessage for FileTransfer {
                 Ok(())
             }
             Self::DeltaEnd => Ok(()),
-            Self::TransferAccepted {
-                id,
-                generation,
-                digest,
-            } => {
+            Self::TransferAccepted { id } => {
                 writer.u64(id.get());
-                writer.u32(generation.get());
-                writer.digest(*digest);
                 Ok(())
             }
             Self::Failure(failure) => writer.failure(failure),
@@ -868,12 +731,10 @@ impl WireMessage for FileTransfer {
         match kind {
             1 => Ok(Self::FileRequest {
                 id: OperationId::new(reader.u64()?),
-                generation: Generation::new(reader.u32()?),
                 path: reader.path()?,
                 basis: reader.optional(|reader| {
                     Ok(FileBasis {
                         size: reader.u64()?,
-                        digest: reader.digest()?,
                     })
                 })?,
             }),
@@ -886,10 +747,7 @@ impl WireMessage for FileTransfer {
                 weak: reader.u32()?,
                 strong: reader.digest()?,
             }),
-            4 => Ok(Self::DeltaHeader {
-                result_size: reader.u64()?,
-                result_digest: reader.digest()?,
-            }),
+            4 => Ok(Self::DeltaHeader),
             5 => Ok(Self::Copy {
                 basis_offset: reader.u64()?,
                 length: reader.u32()?,
@@ -898,8 +756,6 @@ impl WireMessage for FileTransfer {
             7 => Ok(Self::DeltaEnd),
             8 => Ok(Self::TransferAccepted {
                 id: OperationId::new(reader.u64()?),
-                generation: Generation::new(reader.u32()?),
-                digest: reader.digest()?,
             }),
             9 => Ok(Self::Failure(reader.failure()?)),
             _ => Err(CodecError::UnknownMessageKind(kind)),
@@ -907,155 +763,6 @@ impl WireMessage for FileTransfer {
     }
 }
 
-fn write_versions(writer: &mut Writer<'_>, versions: &[ProtocolVersion]) -> Result<(), CodecError> {
-    writer.collection_len(versions.len())?;
-    let mut previous = None;
-    for version in versions {
-        if previous == Some(version.get()) {
-            return Err(CodecError::DuplicateValue("protocol version"));
-        }
-        if previous.is_some_and(|previous| previous > version.get()) {
-            return Err(CodecError::NonCanonicalOrder("protocol version"));
-        }
-        previous = Some(version.get());
-        writer.u16(version.get());
-    }
-    Ok(())
-}
-fn read_versions(reader: &mut Reader<'_>) -> Result<Vec<ProtocolVersion>, CodecError> {
-    let count = reader.collection_len()?;
-    let mut previous = None;
-    let mut versions = Vec::with_capacity(count);
-    for _ in 0..count {
-        let version = reader.u16()?;
-        if previous == Some(version) {
-            return Err(CodecError::DuplicateValue("protocol version"));
-        }
-        if previous.is_some_and(|previous| previous > version) {
-            return Err(CodecError::NonCanonicalOrder("protocol version"));
-        }
-        previous = Some(version);
-        versions.push(ProtocolVersion::new(version));
-    }
-    Ok(versions)
-}
-fn write_capabilities(
-    writer: &mut Writer<'_>,
-    capabilities: &[Capability],
-) -> Result<(), CodecError> {
-    writer.collection_len(capabilities.len())?;
-    let mut previous = None;
-    for capability in capabilities {
-        if previous == Some(capability.code()) {
-            return Err(CodecError::DuplicateValue("capability"));
-        }
-        if previous.is_some_and(|previous| previous > capability.code()) {
-            return Err(CodecError::NonCanonicalOrder("capability"));
-        }
-        previous = Some(capability.code());
-        writer.u16(capability.code());
-        writer.u8(match capability.requirement() {
-            Requirement::Required => 0,
-            Requirement::Optional => 1,
-        });
-    }
-    Ok(())
-}
-fn read_capabilities(reader: &mut Reader<'_>) -> Result<Vec<Capability>, CodecError> {
-    let count = reader.collection_len()?;
-    let mut previous = None;
-    let mut capabilities = Vec::with_capacity(count);
-    for _ in 0..count {
-        let code = reader.u16()?;
-        if previous == Some(code) {
-            return Err(CodecError::DuplicateValue("capability"));
-        }
-        if previous.is_some_and(|previous| previous > code) {
-            return Err(CodecError::NonCanonicalOrder("capability"));
-        }
-        previous = Some(code);
-        let requirement = match reader.u8()? {
-            0 => Requirement::Required,
-            1 => Requirement::Optional,
-            _ => return Err(CodecError::InvalidValue("requirement")),
-        };
-        capabilities.push(Capability::new(code, requirement));
-    }
-    Ok(capabilities)
-}
-fn write_rule(writer: &mut Writer<'_>, rule: &PolicyRuleFile) -> Result<(), CodecError> {
-    writer.optional(rule.scope.as_ref(), |writer, path| writer.path(path))?;
-    writer.bytes(&rule.contents);
-    writer.digest(rule.digest);
-    Ok(())
-}
-fn read_rule(reader: &mut Reader<'_>) -> Result<PolicyRuleFile, CodecError> {
-    Ok(PolicyRuleFile {
-        scope: reader.optional(Reader::path)?,
-        contents: reader.bytes()?,
-        digest: reader.digest()?,
-    })
-}
-fn write_status(writer: &mut Writer<'_>, status: &SessionStatus) -> Result<(), CodecError> {
-    match status {
-        SessionStatus::InProgress => writer.u8(1),
-        SessionStatus::ReadyToCommit => writer.u8(2),
-        SessionStatus::Committing => writer.u8(3),
-        SessionStatus::Complete { manifest_digest } => {
-            writer.u8(4);
-            writer.digest(*manifest_digest);
-        }
-        SessionStatus::Failed { error_code } => {
-            writer.u8(5);
-            writer.u16(*error_code as u16);
-        }
-    }
-    Ok(())
-}
-fn read_status(reader: &mut Reader<'_>) -> Result<SessionStatus, CodecError> {
-    match reader.u8()? {
-        1 => Ok(SessionStatus::InProgress),
-        2 => Ok(SessionStatus::ReadyToCommit),
-        3 => Ok(SessionStatus::Committing),
-        4 => Ok(SessionStatus::Complete {
-            manifest_digest: reader.digest()?,
-        }),
-        5 => Ok(SessionStatus::Failed {
-            error_code: wire_error(reader.u16()?)?,
-        }),
-        _ => Err(CodecError::InvalidValue("session status")),
-    }
-}
-fn cancel_tag(value: CancelReason) -> u8 {
-    match value {
-        CancelReason::UserRequested => 1,
-        CancelReason::SourceChanged => 2,
-        CancelReason::Superseded => 3,
-    }
-}
-fn cancel(value: u8) -> Result<CancelReason, CodecError> {
-    match value {
-        1 => Ok(CancelReason::UserRequested),
-        2 => Ok(CancelReason::SourceChanged),
-        3 => Ok(CancelReason::Superseded),
-        _ => Err(CodecError::InvalidValue("cancel reason")),
-    }
-}
-fn retry_tag(value: WireRetry) -> u8 {
-    match value {
-        WireRetry::Never => 1,
-        WireRetry::NewSession => 2,
-        WireRetry::QueryThenRetry => 3,
-    }
-}
-fn retry(value: u8) -> Result<WireRetry, CodecError> {
-    match value {
-        1 => Ok(WireRetry::Never),
-        2 => Ok(WireRetry::NewSession),
-        3 => Ok(WireRetry::QueryThenRetry),
-        _ => Err(CodecError::InvalidValue("retry policy")),
-    }
-}
 fn phase_tag(value: Phase) -> u8 {
     match value {
         Phase::Handshake => 1,

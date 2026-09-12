@@ -20,7 +20,6 @@ libc = "0.2.175"
 # excluded because peers are pinned. All use is isolated behind transport::quic.
 quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 ring = { version = "0.17.14", default-features = false, features = ["std"] }
-rusqlite.workspace = true
 rustls = { version = "0.23.32", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.219", features = ["derive"] }
 sha2 = { version = "0.10.9", default-features = false, features = ["std"] }

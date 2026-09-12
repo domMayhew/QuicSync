@@ -2,15 +2,7 @@
 
 use std::{fmt, str::FromStr};
 
-use crate::types::{OperationId, Phase, RelativePath, SessionId};
-
-/// The action a caller may safely take after an error.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RetryClass {
-    Never,
-    NewSession,
-    QueryThenRetry,
-}
+use crate::types::{OperationId, Phase, RelativePath};
 
 /// A stable, machine-readable failure category.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -26,8 +18,6 @@ pub enum ErrorCode {
     IntegrityMismatch,
     UnsupportedFilesystem,
     ResourceLimitExceeded,
-    SessionConflict,
-    SessionStateUnavailable,
     OperationFailed,
     Io,
     TransportUnavailable,
@@ -48,8 +38,6 @@ impl ErrorCode {
         Self::IntegrityMismatch,
         Self::UnsupportedFilesystem,
         Self::ResourceLimitExceeded,
-        Self::SessionConflict,
-        Self::SessionStateUnavailable,
         Self::OperationFailed,
         Self::Io,
         Self::TransportUnavailable,
@@ -70,36 +58,12 @@ impl ErrorCode {
             Self::IntegrityMismatch => "integrity_mismatch",
             Self::UnsupportedFilesystem => "unsupported_filesystem",
             Self::ResourceLimitExceeded => "resource_limit_exceeded",
-            Self::SessionConflict => "session_conflict",
-            Self::SessionStateUnavailable => "session_state_unavailable",
             Self::OperationFailed => "operation_failed",
             Self::Io => "io_error",
             Self::TransportUnavailable => "transport_unavailable",
             Self::CompletionUnknown => "completion_unknown",
             Self::Cancelled => "cancelled",
             Self::Internal => "internal_error",
-        }
-    }
-
-    /// Retry policy is fixed by the code so sensitive failures cannot be downgraded.
-    pub const fn retry_class(self) -> RetryClass {
-        match self {
-            Self::TransportUnavailable | Self::OperationFailed | Self::Io | Self::Cancelled => {
-                RetryClass::NewSession
-            }
-            Self::CompletionUnknown | Self::SessionStateUnavailable => RetryClass::QueryThenRetry,
-            Self::InvalidConfiguration
-            | Self::AuthenticationFailed
-            | Self::AuthorizationDenied
-            | Self::ProtocolViolation
-            | Self::UnsupportedProtocol
-            | Self::InvalidPath
-            | Self::PathConfinementViolation
-            | Self::IntegrityMismatch
-            | Self::UnsupportedFilesystem
-            | Self::ResourceLimitExceeded
-            | Self::SessionConflict
-            | Self::Internal => RetryClass::Never,
         }
     }
 
@@ -113,8 +77,6 @@ impl ErrorCode {
             Self::IntegrityMismatch => "content verification failed",
             Self::UnsupportedFilesystem => "filesystem operation is not supported",
             Self::ResourceLimitExceeded => "resource limit exceeded",
-            Self::SessionConflict => "session conflicts with existing state",
-            Self::SessionStateUnavailable => "session status is temporarily unavailable",
             Self::OperationFailed => "operation failed",
             Self::Io => "input/output operation failed",
             Self::TransportUnavailable => "transport is unavailable",
@@ -172,17 +134,11 @@ impl TryFrom<&str> for ErrorCode {
 /// Structured local context that must never be copied into a peer error.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ErrorContext {
-    session: Option<SessionId>,
     operation: Option<OperationId>,
     path: Option<RelativePath>,
 }
 
 impl ErrorContext {
-    pub fn with_session(mut self, session: SessionId) -> Self {
-        self.session = Some(session);
-        self
-    }
-
     pub fn with_operation(mut self, operation: OperationId) -> Self {
         self.operation = Some(operation);
         self
@@ -191,10 +147,6 @@ impl ErrorContext {
     pub fn with_path(mut self, path: RelativePath) -> Self {
         self.path = Some(path);
         self
-    }
-
-    pub const fn session(&self) -> Option<SessionId> {
-        self.session
     }
 
     pub const fn operation(&self) -> Option<OperationId> {
@@ -232,10 +184,6 @@ impl QuicSyncError {
 
     pub const fn code(&self) -> ErrorCode {
         self.code
-    }
-
-    pub const fn retry_class(&self) -> RetryClass {
-        self.code.retry_class()
     }
 
     pub const fn phase(&self) -> Option<Phase> {
@@ -276,10 +224,6 @@ pub struct PeerError {
 impl PeerError {
     pub const fn code(self) -> ErrorCode {
         self.code
-    }
-
-    pub const fn retry_class(self) -> RetryClass {
-        self.code.retry_class()
     }
 
     pub const fn phase(self) -> Option<Phase> {

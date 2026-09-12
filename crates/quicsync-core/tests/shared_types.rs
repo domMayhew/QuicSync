@@ -1,18 +1,12 @@
 use quicsync_core::types::{
-    Digest, EntryKind, EntryMetadata, Generation, IndexRecord, OperationId, PathError,
-    RelativePath, SessionId,
+    Digest, EntryKind, EntryMetadata, IndexRecord, OperationId, PathError, RelativePath,
 };
 
 #[test]
 fn identifiers_and_digests_preserve_their_wire_values() {
-    let session = SessionId::from_bytes([0x11; 16]);
     let operation = OperationId::new(42);
-    let generation = Generation::new(3);
     let digest = Digest::from_bytes([0x22; 32]);
-
-    assert_eq!(session.as_bytes(), &[0x11; 16]);
     assert_eq!(operation.get(), 42);
-    assert_eq!(generation.get(), 3);
     assert_eq!(digest.as_bytes(), &[0x22; 32]);
 }
 

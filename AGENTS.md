@@ -28,5 +28,6 @@ medium changes in medium to large codebases over typical WAN connections.
   are acceptable. Preserve existing root-confinement protections.
 - Follow docs/architecture.md and keep the Linear architecture resource in sync.
   Correct conflicting ticket descriptions instead of restoring obsolete requirements.
-- Keep each new PR focused and target it at the preceding open PR in the stack,
-  as authorized by the user. Build and run relevant tests before pushing.
+- Build each ticket on the latest working branch; commit it on a focused branch.
+  PR creation is not required. Continue independently until a real user decision
+  is needed. Build and run relevant tests before pushing.

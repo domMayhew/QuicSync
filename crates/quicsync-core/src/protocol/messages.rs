@@ -1,10 +1,6 @@
-//! Versioned, wire-neutral protocol data and canonical manifest digests.
+//! Fixed-version messages for a single streamed sync attempt.
 
-use std::{collections::BTreeSet, fmt};
-
-use crate::types::{
-    Digest, EntryKind, Generation, IndexRecord, OperationId, Phase, RelativePath, SessionId,
-};
+use crate::types::{Digest, EntryKind, IndexRecord, OperationId, Phase, RelativePath};
 
 /// The first protocol version specified by QuicSync.
 pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(1);
@@ -23,200 +19,18 @@ impl ProtocolVersion {
     }
 }
 
-/// Whether a peer can safely ignore a value that it does not understand.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Requirement {
-    Required,
-    Optional,
-}
-
-/// A capability's stable numeric code and compatibility requirement.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct Capability {
-    code: u16,
-    requirement: Requirement,
-}
-
-impl Capability {
-    pub const fn new(code: u16, requirement: Requirement) -> Self {
-        Self { code, requirement }
-    }
-
-    pub const fn known(code: CapabilityCode, requirement: Requirement) -> Self {
-        Self::new(code as u16, requirement)
-    }
-
-    pub const fn code(self) -> u16 {
-        self.code
-    }
-
-    pub const fn requirement(self) -> Requirement {
-        self.requirement
-    }
-}
-
-/// Capabilities understood by this implementation.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-#[repr(u16)]
-pub enum CapabilityCode {
-    StatusQuery = 1,
-    DeltaTransfer = 2,
-}
-
-impl CapabilityCode {
-    const fn from_wire(code: u16) -> Option<Self> {
-        match code {
-            1 => Some(Self::StatusQuery),
-            2 => Some(Self::DeltaTransfer),
-            _ => None,
-        }
-    }
-}
-
-/// A version or required extension cannot be interpreted safely.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CompatibilityError {
-    NoCommonVersion,
-    UnknownRequiredValue(u16),
-    DuplicateCapability(u16),
-}
-
-impl fmt::Display for CompatibilityError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoCommonVersion => formatter.write_str("peers have no common protocol version"),
-            Self::UnknownRequiredValue(code) => {
-                write!(formatter, "unknown required protocol value {code}")
-            }
-            Self::DuplicateCapability(code) => {
-                write!(formatter, "capability {code} was advertised more than once")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CompatibilityError {}
-
-/// Selects the highest protocol version supported by both peers.
-pub fn negotiate_version(
-    offered: &[ProtocolVersion],
-    supported: &[ProtocolVersion],
-) -> Result<ProtocolVersion, CompatibilityError> {
-    offered
-        .iter()
-        .filter(|version| supported.contains(version))
-        .copied()
-        .max()
-        .ok_or(CompatibilityError::NoCommonVersion)
-}
-
-/// Validates capability compatibility and returns the understood subset.
-///
-/// Unknown optional capabilities are deliberately omitted. Unknown required
-/// capabilities fail negotiation, so adding an extension never silently
-/// changes the meaning of a session.
-pub fn validate_capabilities(
-    capabilities: &[Capability],
-) -> Result<Vec<CapabilityCode>, CompatibilityError> {
-    let mut seen = BTreeSet::new();
-    let mut known = Vec::new();
-
-    for capability in capabilities {
-        if !seen.insert(capability.code) {
-            return Err(CompatibilityError::DuplicateCapability(capability.code));
-        }
-        match CapabilityCode::from_wire(capability.code) {
-            Some(code) => known.push(code),
-            None => {
-                validate_extension(capability.code, capability.requirement, &[])?;
-            }
-        }
-    }
-
-    known.sort_unstable();
-    Ok(known)
-}
-
-/// Applies the compatibility rule shared by extensible message and enum codes.
-///
-/// The return value is `true` when the code is understood and `false` when an
-/// unknown optional code should be ignored. An unknown required code is always
-/// an error. The codec uses this rule after decoding a raw numeric code.
-pub fn validate_extension(
-    code: u16,
-    requirement: Requirement,
-    known_codes: &[u16],
-) -> Result<bool, CompatibilityError> {
-    if known_codes.contains(&code) {
-        Ok(true)
-    } else if requirement == Requirement::Optional {
-        Ok(false)
-    } else {
-        Err(CompatibilityError::UnknownRequiredValue(code))
-    }
-}
-
 /// Messages carried by the session's control stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Control {
-    ClientHello {
-        versions: Vec<ProtocolVersion>,
-        capabilities: Vec<Capability>,
-        nonce: [u8; 32],
-    },
-    ServerHello {
-        version: ProtocolVersion,
-        capabilities: Vec<Capability>,
-        nonce: [u8; 32],
-    },
     StartSync {
-        session_id: SessionId,
         root_id: String,
     },
-    PolicyBegin,
-    PolicyRuleFile(PolicyRuleFile),
-    PolicyEnd {
-        policy_digest: Digest,
-    },
     StartAccepted,
-    StartStatus(SessionStatus),
-    PlanBegin,
     Operation(Operation),
     /// No more operations follow; carries no count or integrity manifest.
     PlanEnd,
-    CommitRequest,
     CompleteAck,
-    Cancel {
-        reason: CancelReason,
-    },
     Failure(WireFailure),
-}
-
-/// A source policy file and the directory at which its rules take effect.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PolicyRuleFile {
-    /// `None` denotes the synchronization root.
-    pub scope: Option<RelativePath>,
-    pub contents: Vec<u8>,
-    pub digest: Digest,
-}
-
-/// Messages that delimit and describe the source's policy snapshot.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PolicyMessage {
-    Begin,
-    RuleFile(PolicyRuleFile),
-    End { policy_digest: Digest },
-}
-
-/// The durable state returned when an existing session is queried.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SessionStatus {
-    InProgress,
-    ReadyToCommit,
-    Committing,
-    Complete { manifest_digest: Digest },
-    Failed { error_code: WireErrorCode },
 }
 
 /// One item on the ordered destination-index stream.
@@ -231,17 +45,14 @@ pub enum IndexMessage {
 pub enum Operation {
     UpsertDirectory {
         id: OperationId,
-        generation: Generation,
         record: IndexRecord,
     },
     UpsertFile {
         id: OperationId,
-        generation: Generation,
         record: IndexRecord,
     },
     UpsertSymlink {
         id: OperationId,
-        generation: Generation,
         record: IndexRecord,
     },
     Delete {
@@ -261,15 +72,6 @@ impl Operation {
         }
     }
 
-    pub const fn generation(&self) -> Option<Generation> {
-        match self {
-            Self::UpsertDirectory { generation, .. }
-            | Self::UpsertFile { generation, .. }
-            | Self::UpsertSymlink { generation, .. } => Some(*generation),
-            Self::Delete { .. } => None,
-        }
-    }
-
     pub const fn path(&self) -> &RelativePath {
         match self {
             Self::UpsertDirectory { record, .. }
@@ -284,7 +86,6 @@ impl Operation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileBasis {
     pub size: u64,
-    pub digest: Digest,
 }
 
 /// Messages on one bounded file-transfer stream.
@@ -292,7 +93,6 @@ pub struct FileBasis {
 pub enum FileTransfer {
     FileRequest {
         id: OperationId,
-        generation: Generation,
         path: RelativePath,
         basis: Option<FileBasis>,
     },
@@ -305,10 +105,7 @@ pub enum FileTransfer {
         weak: u32,
         strong: Digest,
     },
-    DeltaHeader {
-        result_size: u64,
-        result_digest: Digest,
-    },
+    DeltaHeader,
     Copy {
         basis_offset: u64,
         length: u32,
@@ -317,32 +114,8 @@ pub enum FileTransfer {
     DeltaEnd,
     TransferAccepted {
         id: OperationId,
-        generation: Generation,
-        digest: Digest,
     },
     Failure(WireFailure),
-}
-
-/// Positive acknowledgments with an unambiguous durable meaning.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Acknowledgment {
-    StartAccepted,
-    TransferAccepted {
-        id: OperationId,
-        generation: Generation,
-        digest: Digest,
-    },
-    Complete {
-        manifest_digest: Digest,
-    },
-}
-
-/// A peer-visible reason for cancelling a session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CancelReason {
-    UserRequested,
-    SourceChanged,
-    Superseded,
 }
 
 /// Stable failure codes carried across the protocol boundary.
@@ -360,81 +133,12 @@ pub enum WireErrorCode {
     Internal = 9,
 }
 
-/// Whether a failure can safely be retried.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WireRetry {
-    Never,
-    NewSession,
-    QueryThenRetry,
-}
-
 /// Bounded, safe-to-disclose failure information.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WireFailure {
     pub code: WireErrorCode,
     pub message: String,
-    pub retry: WireRetry,
     pub phase: Phase,
     pub operation_id: Option<OperationId>,
     pub path: Option<RelativePath>,
-}
-
-/// Computes an order-sensitive digest of a policy snapshot.
-pub fn canonical_policy_digest(rules: &[PolicyRuleFile]) -> Digest {
-    let mut encoder = CanonicalEncoder::new(b"quicsync-policy-v1");
-    encoder.u64(rules.len() as u64);
-    for rule in rules {
-        encoder.optional_path(rule.scope.as_ref());
-        encoder.bytes(&rule.contents);
-        encoder.digest(rule.digest);
-    }
-    encoder.finish()
-}
-
-struct CanonicalEncoder(blake3::Hasher);
-
-impl CanonicalEncoder {
-    fn new(domain: &[u8]) -> Self {
-        let mut encoder = Self(blake3::Hasher::new());
-        encoder.bytes(domain);
-        encoder
-    }
-
-    fn finish(self) -> Digest {
-        Digest::from_bytes(*self.0.finalize().as_bytes())
-    }
-
-    fn u8(&mut self, value: u8) {
-        self.0.update(&[value]);
-    }
-
-    fn u64(&mut self, value: u64) {
-        self.0.update(&value.to_le_bytes());
-    }
-
-    fn bytes(&mut self, value: &[u8]) {
-        self.u64(value.len() as u64);
-        self.0.update(value);
-    }
-
-    fn digest(&mut self, value: Digest) {
-        self.0.update(value.as_bytes());
-    }
-
-    fn path(&mut self, value: &RelativePath) {
-        self.u64(value.components().len() as u64);
-        for component in value.components() {
-            self.bytes(component);
-        }
-    }
-
-    fn optional_path(&mut self, value: Option<&RelativePath>) {
-        match value {
-            Some(path) => {
-                self.u8(1);
-                self.path(path);
-            }
-            None => self.u8(0),
-        }
-    }
 }

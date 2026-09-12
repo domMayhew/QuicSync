@@ -11,8 +11,7 @@ use crate::{
     config::SourceConfig,
     error::{ErrorCode, QuicSyncError},
     filesystem::paths::PROTECTED_COMPONENTS,
-    protocol::messages::{PolicyRuleFile, canonical_policy_digest},
-    types::{Digest, EntryKind, RelativePath},
+    types::{EntryKind, RelativePath},
 };
 
 /// Whether an entry belongs to the source-managed path set.
@@ -29,9 +28,7 @@ pub enum IgnoreDecision {
 /// Ignore rules accumulated by the active filesystem traversal.
 #[derive(Clone, Debug)]
 pub struct IgnorePolicy {
-    rules: Vec<PolicyRuleFile>,
     scoped: Vec<ScopedRuleSet>,
-    digest: Digest,
 }
 
 #[derive(Clone, Debug)]
@@ -43,11 +40,7 @@ struct ScopedRuleSet {
 impl IgnorePolicy {
     /// Creates an empty policy for traversal.
     pub fn empty() -> Self {
-        Self {
-            rules: Vec::new(),
-            scoped: Vec::new(),
-            digest: canonical_policy_digest(&[]),
-        }
+        Self { scoped: Vec::new() }
     }
 
     /// Creates a traversal policy with the source configuration's root-scoped exclusions.
@@ -67,15 +60,6 @@ impl IgnorePolicy {
         Ok(policy)
     }
 
-    /// Reconstructs a policy from known rule files.
-    pub fn from_rule_files(rules: Vec<PolicyRuleFile>) -> Result<Self, QuicSyncError> {
-        let mut policy = Self::empty();
-        for rule in rules {
-            policy.add_rule_file(rule)?;
-        }
-        Ok(policy)
-    }
-
     /// Adds a `.gitignore` file discovered by the active filesystem traversal.
     ///
     /// `scope` is the directory containing the ignore file. `None` denotes the root.
@@ -84,35 +68,9 @@ impl IgnorePolicy {
         scope: Option<RelativePath>,
         contents: Vec<u8>,
     ) -> Result<(), QuicSyncError> {
-        self.add_rule_file(rule_file(scope, contents))
-    }
-
-    /// Adds a validated policy rule file to the current traversal state.
-    pub fn add_rule_file(&mut self, rule: PolicyRuleFile) -> Result<(), QuicSyncError> {
-        let actual = digest(&rule.contents);
-        if rule.digest != actual {
-            return Err(QuicSyncError::new(
-                ErrorCode::IntegrityMismatch,
-                None,
-                "ignore-policy rule digest does not match its contents",
-            ));
-        }
-        let matcher = build_matcher(&rule)?;
-        self.scoped.push(ScopedRuleSet {
-            scope: rule.scope.clone(),
-            matcher,
-        });
-        self.rules.push(rule);
-        self.digest = canonical_policy_digest(&self.rules);
+        let matcher = build_matcher(scope.as_ref(), &contents)?;
+        self.scoped.push(ScopedRuleSet { scope, matcher });
         Ok(())
-    }
-
-    pub fn digest(&self) -> Digest {
-        self.digest
-    }
-
-    pub fn rule_files(&self) -> &[PolicyRuleFile] {
-        &self.rules
     }
 
     pub(crate) fn checkpoint(&self) -> usize {
@@ -122,8 +80,6 @@ impl IgnorePolicy {
     /// Discard a completed directory's rules so siblings retain only inherited policy.
     pub(crate) fn restore(&mut self, checkpoint: usize) {
         self.scoped.truncate(checkpoint);
-        self.rules.truncate(checkpoint);
-        self.digest = canonical_policy_digest(&self.rules);
     }
 
     pub fn decision(&self, path: &RelativePath, kind: EntryKind) -> IgnoreDecision {
@@ -159,20 +115,20 @@ impl IgnorePolicy {
     }
 }
 
-fn build_matcher(rule: &PolicyRuleFile) -> Result<Gitignore, QuicSyncError> {
-    let root = relative_to_path(rule.scope.as_ref());
+fn build_matcher(
+    scope: Option<&RelativePath>,
+    contents: &[u8],
+) -> Result<Gitignore, QuicSyncError> {
+    let root = relative_to_path(scope);
     let mut builder = GitignoreBuilder::new(root);
-    let contents = std::str::from_utf8(&rule.contents).map_err(|error| {
+    let contents = std::str::from_utf8(contents).map_err(|error| {
         QuicSyncError::new(
             ErrorCode::InvalidConfiguration,
             None,
             format!("ignore-policy rule file is not valid UTF-8: {error}"),
         )
     })?;
-    let from = rule
-        .scope
-        .as_ref()
-        .map(|scope| relative_to_path(Some(scope)).join(".gitignore"));
+    let from = scope.map(|scope| relative_to_path(Some(scope)).join(".gitignore"));
     for line in contents.lines() {
         builder.add_line(from.clone(), line).map_err(|error| {
             QuicSyncError::new(
@@ -189,18 +145,6 @@ fn build_matcher(rule: &PolicyRuleFile) -> Result<Gitignore, QuicSyncError> {
             format!("cannot build ignore-policy matcher: {error}"),
         )
     })
-}
-
-fn rule_file(scope: Option<RelativePath>, contents: Vec<u8>) -> PolicyRuleFile {
-    PolicyRuleFile {
-        scope,
-        digest: digest(&contents),
-        contents,
-    }
-}
-
-fn digest(contents: &[u8]) -> Digest {
-    Digest::from_bytes(*blake3::hash(contents).as_bytes())
 }
 
 fn scoped_path(path: &RelativePath, scope: Option<&RelativePath>) -> Option<PathBuf> {

@@ -5,7 +5,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use crate::{
     error::{ErrorCode, QuicSyncError},
     protocol::messages::{IndexMessage, Operation},
-    types::{EntryKind, Generation, IndexRecord, OperationId, Phase},
+    types::{EntryKind, IndexRecord, OperationId, Phase},
 };
 
 /// Streams operations in canonical merge order with one lookahead record per input.
@@ -53,23 +53,10 @@ pub async fn plan(
             }
             if let Some(record) = a {
                 let id = id(&mut next_id);
-                let generation = Generation::new(0);
                 let operation = match record.metadata.kind() {
-                    EntryKind::Directory => Operation::UpsertDirectory {
-                        id,
-                        generation,
-                        record,
-                    },
-                    EntryKind::RegularFile => Operation::UpsertFile {
-                        id,
-                        generation,
-                        record,
-                    },
-                    EntryKind::Symlink => Operation::UpsertSymlink {
-                        id,
-                        generation,
-                        record,
-                    },
+                    EntryKind::Directory => Operation::UpsertDirectory { id, record },
+                    EntryKind::RegularFile => Operation::UpsertFile { id, record },
+                    EntryKind::Symlink => Operation::UpsertSymlink { id, record },
                 };
                 send(&output, operation).await?;
             }

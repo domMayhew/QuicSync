@@ -2,39 +2,6 @@
 
 use std::fmt;
 
-/// Identifies one synchronization attempt.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SessionId([u8; 16]);
-
-impl SessionId {
-    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; 16] {
-        &self.0
-    }
-
-    pub const fn into_bytes(self) -> [u8; 16] {
-        self.0
-    }
-}
-
-impl From<[u8; 16]> for SessionId {
-    fn from(value: [u8; 16]) -> Self {
-        Self::from_bytes(value)
-    }
-}
-
-impl fmt::Display for SessionId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
-
 /// Identifies an operation within a session plan.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OperationId(u64);
@@ -51,26 +18,6 @@ impl OperationId {
 
 impl From<u64> for OperationId {
     fn from(value: u64) -> Self {
-        Self::new(value)
-    }
-}
-
-/// Identifies a revision of an operation's payload.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Generation(u32);
-
-impl Generation {
-    pub const fn new(value: u32) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-}
-
-impl From<u32> for Generation {
-    fn from(value: u32) -> Self {
         Self::new(value)
     }
 }

@@ -102,22 +102,4 @@ fn configured_exclusions_are_root_scoped_policy_rules() {
         policy.decision(&file_path(b"machine.local"), EntryKind::RegularFile),
         IgnoreDecision::Ignored,
     );
-    assert_eq!(policy.rule_files().len(), 1);
-}
-
-#[test]
-fn policy_reconstruction_validates_rule_digests() {
-    let mut policy = IgnorePolicy::empty();
-    policy
-        .add_ignore_contents(None, b"target/\n".to_vec())
-        .unwrap();
-    let digest = policy.digest();
-
-    let reconstructed = IgnorePolicy::from_rule_files(policy.rule_files().to_vec()).unwrap();
-
-    assert_eq!(reconstructed.digest(), digest);
-    assert_eq!(
-        reconstructed.decision(&file_path(b"target"), EntryKind::Directory),
-        IgnoreDecision::Ignored,
-    );
 }
