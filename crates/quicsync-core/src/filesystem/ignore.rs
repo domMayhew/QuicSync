@@ -115,6 +115,17 @@ impl IgnorePolicy {
         &self.rules
     }
 
+    pub(crate) fn checkpoint(&self) -> usize {
+        self.scoped.len()
+    }
+
+    /// Discard a completed directory's rules so siblings retain only inherited policy.
+    pub(crate) fn restore(&mut self, checkpoint: usize) {
+        self.scoped.truncate(checkpoint);
+        self.rules.truncate(checkpoint);
+        self.digest = canonical_policy_digest(&self.rules);
+    }
+
     pub fn decision(&self, path: &RelativePath, kind: EntryKind) -> IgnoreDecision {
         if is_protected(path) {
             return IgnoreDecision::Protected;
