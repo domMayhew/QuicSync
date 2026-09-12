@@ -99,7 +99,7 @@ fn invalid_utf8_and_unknown_messages_are_rejected() {
 #[test]
 fn stream_categories_use_distinct_message_kinds() {
     let index = IndexMessage::End;
-    let transfer = FileTransfer::Literal(vec![1, 2, 3]);
+    let transfer = FileTransfer::Delta(vec![1, 2, 3]);
 
     assert_eq!(
         decode(&encode(&index, &limits()).unwrap(), &limits()),
@@ -125,8 +125,8 @@ fn finish_rejects_truncated_headers_and_payloads() {
 #[test]
 fn operations_and_transfer_messages_round_trip_without_recovery_fields() {
     use quicsync_core::{
-        protocol::messages::{FileBasis, Operation},
-        types::{Digest, EntryKind, EntryMetadata, IndexRecord, OperationId, RelativePath},
+        protocol::messages::Operation,
+        types::{EntryKind, EntryMetadata, IndexRecord, OperationId, RelativePath},
     };
     let id = OperationId::new(4);
     let path = RelativePath::new(vec![b"file".to_vec()]).unwrap();
@@ -153,26 +153,10 @@ fn operations_and_transfer_messages_round_trip_without_recovery_fields() {
         );
     }
     let messages = [
-        FileTransfer::FileRequest {
-            id,
-            path,
-            basis: Some(FileBasis { size: 80 }),
-        },
-        FileTransfer::SignatureHeader {
-            basis_size: 80,
-            block_size: 20,
-            block_count: 4,
-        },
-        FileTransfer::SignatureBlock {
-            weak: 123,
-            strong: Digest::from_bytes([8; 32]),
-        },
-        FileTransfer::DeltaHeader,
-        FileTransfer::Copy {
-            basis_offset: 20,
-            length: 10,
-        },
-        FileTransfer::Literal(vec![1, 2, 3]),
+        FileTransfer::FileRequest { id, path },
+        FileTransfer::Signature(vec![1, 2, 3]),
+        FileTransfer::SignatureEnd,
+        FileTransfer::Delta(vec![1, 2, 3]),
         FileTransfer::DeltaEnd,
         FileTransfer::TransferAccepted { id },
     ];

@@ -1,8 +1,8 @@
 # Delta engine decision for HME-435
 
-Status: maintainer decision needed before selecting the dependency.
+Status: approved by the maintainer on 2026-09-12, including bundled LGPL-2.1 C code.
 
-## Proposed choice
+## Selected engine
 
 Use librsync 0.2.6 with default features disabled. Its Rust Signature, Delta and
 Patch adapters consume Read/Seek inputs and produce Read outputs. Run them on
@@ -30,12 +30,11 @@ Inspected Cargo's downloaded sources for librsync 0.2.6 and librsync-sys 0.1.4:
 - A C compiler is therefore needed on Linux and macOS. Default logging is
   optional and not needed for the POC; disable default features.
 - The crate metadata alone is insufficient to describe the transitive licensing
-  impact. Keep the bundled notices and review distribution obligations before
-  enabling this dependency. No license-policy exception has been added.
+  impact. Preserve the bundled notices in distributions; dependency use is approved
+  for this POC. This approval does not change the repository's MIT license.
 
-The repository dependency policy requires explicit maintainer review for
-weak-copyleft dependencies. The decision is whether to accept the bundled LGPL
-implementation for this POC or keep the implementation permissively licensed.
+The maintainer explicitly approved the weak-copyleft dependency after reviewing
+the native implementation and static-linking arrangement.
 This note is dependency evidence, not a determination of legal obligations.
 
 ## Alternatives considered

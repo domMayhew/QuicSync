@@ -218,3 +218,55 @@ fn reject_protected(path: &RelativePath) -> Result<(), QuicSyncError> {
 fn limit_exceeded(diagnostic: String) -> QuicSyncError {
     QuicSyncError::new(ErrorCode::ResourceLimitExceeded, None, diagnostic)
 }
+
+/// Opens a regular file without following links; absent paths or non-files have no basis.
+/// This also permits a new source subtree where a destination ancestor is still a file.
+pub fn open_regular(
+    root: &RootHandle,
+    path: &RelativePath,
+) -> Result<Option<std::fs::File>, QuicSyncError> {
+    reject_protected(path)?;
+    let (leaf, ancestors) = path.components().split_last().expect("validated path");
+    let mut directory = duplicate(root.as_fd(), path)?;
+    for ancestor in ancestors {
+        let name = CString::new(ancestor.as_slice()).unwrap();
+        directory =
+            match rustix::fs::openat(&directory, name.as_c_str(), DIRECTORY_FLAGS, Mode::empty()) {
+                Ok(fd) => fd,
+                Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return Ok(None),
+                Err(error) => {
+                    return Err(QuicSyncError::new(
+                        ErrorCode::Io,
+                        None,
+                        format!("open file ancestor: {error}"),
+                    ));
+                }
+            };
+    }
+    let name = CString::new(leaf.as_slice()).unwrap();
+    let fd = match rustix::fs::openat(
+        &directory,
+        name.as_c_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT | Errno::LOOP) => return Ok(None),
+        Err(error) => {
+            return Err(QuicSyncError::new(
+                ErrorCode::Io,
+                None,
+                format!("open file: {error}"),
+            ));
+        }
+    };
+    let file = std::fs::File::from(fd);
+    if !file
+        .metadata()
+        .map_err(|error| QuicSyncError::new(ErrorCode::Io, None, error.to_string()))?
+        .is_file()
+    {
+        return Ok(None);
+    }
+    Ok(Some(file))
+}

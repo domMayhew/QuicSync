@@ -1,6 +1,6 @@
 //! Fixed-version messages for a single streamed sync attempt.
 
-use crate::types::{Digest, EntryKind, IndexRecord, OperationId, Phase, RelativePath};
+use crate::types::{EntryKind, IndexRecord, OperationId, Phase, RelativePath};
 
 /// The first protocol version specified by QuicSync.
 pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::new(1);
@@ -82,40 +82,15 @@ impl Operation {
     }
 }
 
-/// A destination file that may be used as the basis for a delta.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FileBasis {
-    pub size: u64,
-}
-
-/// Messages on one bounded file-transfer stream.
+/// Messages on one file stream. Signature/delta bytes use librsync's own format.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileTransfer {
-    FileRequest {
-        id: OperationId,
-        path: RelativePath,
-        basis: Option<FileBasis>,
-    },
-    SignatureHeader {
-        basis_size: u64,
-        block_size: u32,
-        block_count: u32,
-    },
-    SignatureBlock {
-        weak: u32,
-        strong: Digest,
-    },
-    DeltaHeader,
-    Copy {
-        basis_offset: u64,
-        length: u32,
-    },
-    Literal(Vec<u8>),
+    FileRequest { id: OperationId, path: RelativePath },
+    Signature(Vec<u8>),
+    SignatureEnd,
+    Delta(Vec<u8>),
     DeltaEnd,
-    TransferAccepted {
-        id: OperationId,
-    },
-    Failure(WireFailure),
+    TransferAccepted { id: OperationId },
 }
 
 /// Stable failure codes carried across the protocol boundary.
