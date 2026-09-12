@@ -59,9 +59,9 @@ carries typed messages but does not interpret filesystem operations.
 - `transport::quic`: control, destination index, and per-file transfer streams.
 - `sync::{planner,transfer,source,destination,commit}`: concurrent pipeline stages.
 
-The existing `state` module and legacy protocol recovery fields are cleanup
-debt, not architectural requirements. Do not integrate their SQLite journals
-or durable session lifecycle into new orchestration.
+HME-447 removes the SQLite state module, retry/status contracts, generations,
+capability negotiation and whole-file verification fields. New orchestration
+uses only in-memory state for the current attempt.
 
 ## Filesystem model
 
@@ -162,8 +162,7 @@ that no more records follow. They do not prove anything about another QUIC
 stream. Completion still waits for all started transfers and filesystem work.
 A reset or disconnect before an expected end marker fails the attempt.
 No application-level plan/index manifest, operation count, or result digest
-is required. Any temporary `CommitRequest` marker in existing code carries
-no digest and must not delay starting transfers.
+is required. No separate commit-request exchange is required.
 
 QUIC early data (0-RTT) can be replayed. Ordinary post-handshake application
 data is not the same replay concern. Disable mutating 0-RTT in the POC.
@@ -206,8 +205,8 @@ HME-434 streams planning and HME-448 streams filesystem indexing on a blocking
 worker through bounded channels, with per-directory sorting and active-scope
 ignore rules. The scanner still hashes files for change detection; that is distinct
 from reconstructed-file verification. Transport already frames records incrementally.
-HME-447 tracks remaining legacy cleanup: remove unused durable state, generations,
-retry/status machinery, capability negotiation and whole-file verification fields.
+HME-447 removes durable state, generations, retry/status machinery, capability
+negotiation, policy manifests and whole-file verification fields.
 New transfer and orchestration work must compose these incremental producers.
 Do not use legacy code or completed ticket acceptance criteria to reintroduce
 superseded requirements. Keep this file and the Linear architecture resource identical.

@@ -1,12 +1,6 @@
-use quicsync_core::{
-    protocol::{
-        codec::{CodecError, CodecLimits, Decoder, decode, encode},
-        messages::{
-            CURRENT_VERSION, Capability, Control, FileTransfer, IndexMessage, ProtocolVersion,
-            Requirement,
-        },
-    },
-    types::SessionId,
+use quicsync_core::protocol::{
+    codec::{CodecError, CodecLimits, Decoder, decode, encode},
+    messages::{Control, FileTransfer, IndexMessage, ProtocolVersion},
 };
 
 fn limits() -> CodecLimits {
@@ -15,37 +9,27 @@ fn limits() -> CodecLimits {
 
 #[test]
 fn golden_vectors_fix_the_canonical_wire_format() {
-    assert_eq!(
-        encode(&Control::PolicyBegin, &limits()).unwrap(),
-        [3, 4, 1, 0]
-    );
+    assert_eq!(encode(&Control::PlanEnd, &limits()).unwrap(), [3, 11, 1, 0]);
     assert_eq!(
         encode(
             &Control::StartSync {
-                session_id: SessionId::from_bytes([0x11; 16]),
                 root_id: "root".into(),
             },
             &limits(),
         )
         .unwrap(),
-        [
-            24, 3, 1, 0, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
-            0x11, 0x11, 0x11, 0x11, 4, b'r', b'o', b'o', b't',
-        ]
+        [8, 3, 1, 0, 4, b'r', b'o', b'o', b't']
     );
 }
 
 #[test]
 fn control_messages_round_trip() {
     let messages = [
-        Control::ClientHello {
-            versions: vec![ProtocolVersion::new(1), ProtocolVersion::new(2)],
-            capabilities: vec![Capability::new(7, Requirement::Optional)],
-            nonce: [3; 32],
+        Control::StartSync {
+            root_id: "root".into(),
         },
         Control::StartAccepted,
         Control::PlanEnd,
-        Control::CommitRequest,
         Control::CompleteAck,
     ];
 
@@ -57,7 +41,7 @@ fn control_messages_round_trip() {
 
 #[test]
 fn incremental_decoder_accepts_every_chunk_boundary() {
-    let first = encode(&Control::PolicyBegin, &limits()).unwrap();
+    let first = encode(&Control::PlanEnd, &limits()).unwrap();
     let second = encode(&Control::StartAccepted, &limits()).unwrap();
     let wire = [first, second].concat();
 
@@ -66,7 +50,7 @@ fn incremental_decoder_accepts_every_chunk_boundary() {
         let mut decoded = decoder.push(&wire[..split]).unwrap();
         decoded.extend(decoder.push(&wire[split..]).unwrap());
         decoder.finish().unwrap();
-        assert_eq!(decoded, [Control::PolicyBegin, Control::StartAccepted]);
+        assert_eq!(decoded, [Control::PlanEnd, Control::StartAccepted]);
     }
 }
 
@@ -91,7 +75,7 @@ fn malformed_noncanonical_and_trailing_input_is_rejected() {
         Err(CodecError::NonCanonicalVarint)
     );
     assert_eq!(
-        decode::<Control>(&[4, 4, 1, 0, 0], &limits()),
+        decode::<Control>(&[4, 11, 1, 0, 0], &limits()),
         Err(CodecError::TrailingBytes)
     );
     assert_eq!(
@@ -101,56 +85,14 @@ fn malformed_noncanonical_and_trailing_input_is_rejected() {
 }
 
 #[test]
-fn collections_are_bounded_before_their_elements_are_read() {
-    // ClientHello, version 1, followed by a version count of five.
-    let wire = [4, 1, 1, 0, 5];
+fn invalid_utf8_and_unknown_messages_are_rejected() {
     assert_eq!(
-        decode::<Control>(&wire, &limits()),
-        Err(CodecError::LimitExceeded("collection items"))
-    );
-}
-
-#[test]
-fn duplicate_capabilities_and_invalid_utf8_are_rejected() {
-    let duplicate = Control::ClientHello {
-        versions: vec![CURRENT_VERSION],
-        capabilities: vec![
-            Capability::new(7, Requirement::Optional),
-            Capability::new(7, Requirement::Optional),
-        ],
-        nonce: [0; 32],
-    };
-    assert_eq!(
-        encode(&duplicate, &limits()),
-        Err(CodecError::DuplicateValue("capability"))
-    );
-
-    let mut duplicate_wire = vec![45, 1, 1, 0, 1, 1, 0, 2, 7, 0, 1, 7, 0, 1];
-    duplicate_wire.extend_from_slice(&[0; 32]);
-    assert_eq!(
-        decode::<Control>(&duplicate_wire, &limits()),
-        Err(CodecError::DuplicateValue("capability"))
-    );
-
-    let invalid_root = [
-        21, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff,
-    ];
-    assert_eq!(
-        decode::<Control>(&invalid_root, &limits()),
+        decode::<Control>(&[5, 3, 1, 0, 1, 0xff], &limits()),
         Err(CodecError::InvalidValue("UTF-8 string"))
     );
-}
-
-#[test]
-fn unordered_set_fields_are_noncanonical() {
-    let hello = Control::ClientHello {
-        versions: vec![ProtocolVersion::new(2), ProtocolVersion::new(1)],
-        capabilities: Vec::new(),
-        nonce: [0; 32],
-    };
     assert_eq!(
-        encode(&hello, &limits()),
-        Err(CodecError::NonCanonicalOrder("protocol version"))
+        decode::<Control>(&[3, 255, 1, 0], &limits()),
+        Err(CodecError::UnknownMessageKind(255))
     );
 }
 
@@ -178,4 +120,66 @@ fn finish_rejects_truncated_headers_and_payloads() {
     let mut payload = Decoder::<Control>::new(limits());
     payload.push(&[3, 4]).unwrap();
     assert_eq!(payload.finish(), Err(CodecError::UnexpectedEof));
+}
+
+#[test]
+fn operations_and_transfer_messages_round_trip_without_recovery_fields() {
+    use quicsync_core::{
+        protocol::messages::{FileBasis, Operation},
+        types::{Digest, EntryKind, EntryMetadata, IndexRecord, OperationId, RelativePath},
+    };
+    let id = OperationId::new(4);
+    let path = RelativePath::new(vec![b"file".to_vec()]).unwrap();
+    for kind in [
+        EntryKind::RegularFile,
+        EntryKind::Directory,
+        EntryKind::Symlink,
+    ] {
+        let record = IndexRecord {
+            path: path.clone(),
+            metadata: EntryMetadata::new(kind, 0o755, -1, 0),
+            digest: None,
+            symlink_target: None,
+        };
+        let op = match kind {
+            EntryKind::RegularFile => Operation::UpsertFile { id, record },
+            EntryKind::Directory => Operation::UpsertDirectory { id, record },
+            EntryKind::Symlink => Operation::UpsertSymlink { id, record },
+        };
+        let message = Control::Operation(op);
+        assert_eq!(
+            decode::<Control>(&encode(&message, &limits()).unwrap(), &limits()).unwrap(),
+            message
+        );
+    }
+    let messages = [
+        FileTransfer::FileRequest {
+            id,
+            path,
+            basis: Some(FileBasis { size: 80 }),
+        },
+        FileTransfer::SignatureHeader {
+            basis_size: 80,
+            block_size: 20,
+            block_count: 4,
+        },
+        FileTransfer::SignatureBlock {
+            weak: 123,
+            strong: Digest::from_bytes([8; 32]),
+        },
+        FileTransfer::DeltaHeader,
+        FileTransfer::Copy {
+            basis_offset: 20,
+            length: 10,
+        },
+        FileTransfer::Literal(vec![1, 2, 3]),
+        FileTransfer::DeltaEnd,
+        FileTransfer::TransferAccepted { id },
+    ];
+    for message in messages {
+        assert_eq!(
+            decode::<FileTransfer>(&encode(&message, &limits()).unwrap(), &limits()).unwrap(),
+            message
+        );
+    }
 }

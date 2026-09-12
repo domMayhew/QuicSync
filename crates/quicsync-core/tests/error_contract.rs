@@ -1,6 +1,6 @@
 use quicsync_core::{
-    error::{ErrorCode, ErrorContext, QuicSyncError, RetryClass},
-    types::{OperationId, Phase, RelativePath, SessionId},
+    error::{ErrorCode, ErrorContext, QuicSyncError},
+    types::{OperationId, Phase, RelativePath},
 };
 
 #[test]
@@ -15,7 +15,6 @@ fn stable_codes_round_trip_without_using_display_strings() {
 fn local_errors_retain_phase_and_structured_context() {
     let path = RelativePath::new(vec![b"private".to_vec(), b"key.pem".to_vec()]).unwrap();
     let context = ErrorContext::default()
-        .with_session(SessionId::from_bytes([9; 16]))
         .with_operation(OperationId::new(17))
         .with_path(path.clone());
     let error = QuicSyncError::new(
@@ -51,7 +50,6 @@ fn sensitive_peer_errors_expose_only_code_and_safe_fixed_text() {
         let rendered = peer.to_string();
 
         assert_eq!(peer.code(), code);
-        assert_eq!(peer.retry_class(), RetryClass::Never);
         assert!(forbidden.iter().all(|secret| !rendered.contains(secret)));
         assert!(
             forbidden
@@ -59,28 +57,4 @@ fn sensitive_peer_errors_expose_only_code_and_safe_fixed_text() {
                 .all(|secret| !peer.message().contains(secret))
         );
     }
-}
-
-#[test]
-fn retry_classes_are_part_of_the_code_contract() {
-    assert_eq!(
-        ErrorCode::IntegrityMismatch.retry_class(),
-        RetryClass::Never
-    );
-    assert_eq!(
-        ErrorCode::PathConfinementViolation.retry_class(),
-        RetryClass::Never
-    );
-    assert_eq!(
-        ErrorCode::UnsupportedFilesystem.retry_class(),
-        RetryClass::Never
-    );
-    assert_eq!(
-        ErrorCode::TransportUnavailable.retry_class(),
-        RetryClass::NewSession
-    );
-    assert_eq!(
-        ErrorCode::CompletionUnknown.retry_class(),
-        RetryClass::QueryThenRetry
-    );
 }
