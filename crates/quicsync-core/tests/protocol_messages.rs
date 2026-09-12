@@ -1,8 +1,7 @@
 use quicsync_core::{
     protocol::messages::{
         Capability, CapabilityCode, CompatibilityError, Control, FileTransfer, Operation,
-        ProtocolVersion, Requirement, canonical_plan_digest, negotiate_version,
-        validate_capabilities, validate_extension,
+        ProtocolVersion, Requirement, negotiate_version, validate_capabilities, validate_extension,
     },
     types::{Digest, EntryKind, EntryMetadata, Generation, IndexRecord, OperationId, RelativePath},
 };
@@ -65,27 +64,6 @@ fn the_requiredness_rule_also_applies_to_extensible_messages_and_enums() {
         validate_extension(11, Requirement::Required, &[10]),
         Err(CompatibilityError::UnknownRequiredValue(11))
     );
-}
-
-#[test]
-fn equivalent_plans_have_the_same_canonical_digest() {
-    let first = file_operation(1, b"a", 1);
-    let second = file_operation(2, b"b", 2);
-
-    assert_eq!(
-        canonical_plan_digest(&[first.clone(), second.clone()]),
-        canonical_plan_digest(&[second, first])
-    );
-}
-
-#[test]
-fn canonical_plan_digest_covers_operation_contents() {
-    let digest = canonical_plan_digest(&[file_operation(1, b"a", 1)]);
-    assert_eq!(
-        digest.to_string(),
-        "f9f2eaac7a5f1ebb4cd935fd65778f8af9bc21b2a1815c43b6068f046330bf88"
-    );
-    assert_ne!(digest, canonical_plan_digest(&[file_operation(1, b"a", 2)]));
 }
 
 #[test]

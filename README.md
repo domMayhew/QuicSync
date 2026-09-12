@@ -1,8 +1,15 @@
 # QuicSync
 
-QuicSync is an early-stage Rust project for transferring and synchronizing data
-over QUIC. The repository is currently establishing its foundations; interfaces
-and workflows may change before the first release.
+QuicSync is a Rust performance proof of concept for low-latency file sync over
+QUIC. It tests whether streaming and pipelining scanning, indexing, planning,
+and delta transfer can outperform rsync for small to medium changes in medium
+to large codebases. Each stage starts producing useful work before its input
+is complete.
+
+The source is authoritative. Failures stop the attempt; the user starts a fresh
+sync. Automatic retries, resumption, corruption recovery, journals, and durable
+completion tracking are not planned, even for Resilience. Rough CLI output and
+manual setup are acceptable. Streaming is required for the experiment.
 
 ## Prerequisites
 

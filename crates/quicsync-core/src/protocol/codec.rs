@@ -670,9 +670,9 @@ impl WireMessage for Control {
             Self::StartStatus(_) => 8,
             Self::PlanBegin => 9,
             Self::Operation(_) => 10,
-            Self::PlanEnd { .. } => 11,
-            Self::CommitRequest { .. } => 12,
-            Self::CompleteAck { .. } => 13,
+            Self::PlanEnd => 11,
+            Self::CommitRequest => 12,
+            Self::CompleteAck => 13,
             Self::Cancel { .. } => 14,
             Self::Failure(_) => 15,
         }
@@ -716,22 +716,7 @@ impl WireMessage for Control {
             }
             Self::StartStatus(status) => write_status(writer, status),
             Self::Operation(operation) => writer.operation(operation),
-            Self::PlanEnd {
-                operation_count,
-                plan_digest,
-            } => {
-                writer.u64(*operation_count);
-                writer.digest(*plan_digest);
-                Ok(())
-            }
-            Self::CommitRequest { plan_digest } => {
-                writer.digest(*plan_digest);
-                Ok(())
-            }
-            Self::CompleteAck { manifest_digest } => {
-                writer.digest(*manifest_digest);
-                Ok(())
-            }
+            Self::PlanEnd | Self::CommitRequest | Self::CompleteAck => Ok(()),
             Self::Cancel { reason } => {
                 writer.u8(cancel_tag(*reason));
                 Ok(())
@@ -765,16 +750,9 @@ impl WireMessage for Control {
             8 => Ok(Self::StartStatus(read_status(reader)?)),
             9 => Ok(Self::PlanBegin),
             10 => Ok(Self::Operation(reader.operation()?)),
-            11 => Ok(Self::PlanEnd {
-                operation_count: reader.u64()?,
-                plan_digest: reader.digest()?,
-            }),
-            12 => Ok(Self::CommitRequest {
-                plan_digest: reader.digest()?,
-            }),
-            13 => Ok(Self::CompleteAck {
-                manifest_digest: reader.digest()?,
-            }),
+            11 => Ok(Self::PlanEnd),
+            12 => Ok(Self::CommitRequest),
+            13 => Ok(Self::CompleteAck),
             14 => Ok(Self::Cancel {
                 reason: cancel(reader.u8()?)?,
             }),
@@ -788,29 +766,19 @@ impl WireMessage for IndexMessage {
     fn kind(&self) -> u8 {
         match self {
             Self::Record(_) => 1,
-            Self::End { .. } => 2,
+            Self::End => 2,
         }
     }
     fn encode_fields(&self, writer: &mut Writer<'_>) -> Result<(), CodecError> {
         match self {
             Self::Record(record) => writer.record(record),
-            Self::End {
-                count,
-                manifest_digest,
-            } => {
-                writer.u64(*count);
-                writer.digest(*manifest_digest);
-                Ok(())
-            }
+            Self::End => Ok(()),
         }
     }
     fn decode_fields(kind: u8, reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         match kind {
             1 => Ok(Self::Record(reader.record()?)),
-            2 => Ok(Self::End {
-                count: reader.u64()?,
-                manifest_digest: reader.digest()?,
-            }),
+            2 => Ok(Self::End),
             _ => Err(CodecError::UnknownMessageKind(kind)),
         }
     }

@@ -182,16 +182,10 @@ pub enum Control {
     StartStatus(SessionStatus),
     PlanBegin,
     Operation(Operation),
-    PlanEnd {
-        operation_count: u64,
-        plan_digest: Digest,
-    },
-    CommitRequest {
-        plan_digest: Digest,
-    },
-    CompleteAck {
-        manifest_digest: Digest,
-    },
+    /// No more operations follow; carries no count or integrity manifest.
+    PlanEnd,
+    CommitRequest,
+    CompleteAck,
     Cancel {
         reason: CancelReason,
     },
@@ -229,7 +223,7 @@ pub enum SessionStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IndexMessage {
     Record(IndexRecord),
-    End { count: u64, manifest_digest: Digest },
+    End,
 }
 
 /// A deterministic change in a synchronization plan.
@@ -385,27 +379,6 @@ pub struct WireFailure {
     pub path: Option<RelativePath>,
 }
 
-/// Computes the manifest of an operation set in canonical operation-ID order.
-///
-/// Operation IDs define plan order, so callers may provide any in-memory
-/// iteration order without changing the digest.
-pub fn canonical_plan_digest(operations: &[Operation]) -> Digest {
-    let mut canonical = operations.iter().collect::<Vec<_>>();
-    canonical.sort_by_key(|operation| {
-        (
-            operation.id(),
-            operation.generation().map_or(0, Generation::get),
-        )
-    });
-
-    let mut encoder = CanonicalEncoder::new(b"quicsync-plan-v1");
-    encoder.u64(canonical.len() as u64);
-    for operation in canonical {
-        encoder.operation(operation);
-    }
-    encoder.finish()
-}
-
 /// Computes an order-sensitive digest of a policy snapshot.
 pub fn canonical_policy_digest(rules: &[PolicyRuleFile]) -> Digest {
     let mut encoder = CanonicalEncoder::new(b"quicsync-policy-v1");
@@ -414,16 +387,6 @@ pub fn canonical_policy_digest(rules: &[PolicyRuleFile]) -> Digest {
         encoder.optional_path(rule.scope.as_ref());
         encoder.bytes(&rule.contents);
         encoder.digest(rule.digest);
-    }
-    encoder.finish()
-}
-
-/// Computes an order-sensitive digest of a canonical index stream.
-pub fn canonical_index_digest(records: &[IndexRecord]) -> Digest {
-    let mut encoder = CanonicalEncoder::new(b"quicsync-index-v1");
-    encoder.u64(records.len() as u64);
-    for record in records {
-        encoder.record(record);
     }
     encoder.finish()
 }
@@ -443,10 +406,6 @@ impl CanonicalEncoder {
 
     fn u8(&mut self, value: u8) {
         self.0.update(&[value]);
-    }
-
-    fn u32(&mut self, value: u32) {
-        self.0.update(&value.to_le_bytes());
     }
 
     fn u64(&mut self, value: u64) {
@@ -477,80 +436,5 @@ impl CanonicalEncoder {
             }
             None => self.u8(0),
         }
-    }
-
-    fn optional_digest(&mut self, value: Option<Digest>) {
-        match value {
-            Some(digest) => {
-                self.u8(1);
-                self.digest(digest);
-            }
-            None => self.u8(0),
-        }
-    }
-
-    fn optional_bytes(&mut self, value: Option<&[u8]>) {
-        match value {
-            Some(bytes) => {
-                self.u8(1);
-                self.bytes(bytes);
-            }
-            None => self.u8(0),
-        }
-    }
-
-    fn entry_kind(&mut self, value: EntryKind) {
-        self.u8(match value {
-            EntryKind::Directory => 1,
-            EntryKind::RegularFile => 2,
-            EntryKind::Symlink => 3,
-        });
-    }
-
-    fn record(&mut self, value: &IndexRecord) {
-        self.path(&value.path);
-        self.entry_kind(value.metadata.kind());
-        self.u32(value.metadata.mode());
-        self.0.update(&value.metadata.mtime_ns().to_le_bytes());
-        self.u64(value.metadata.size());
-        self.optional_digest(value.digest);
-        self.optional_bytes(value.symlink_target.as_deref());
-    }
-
-    fn operation(&mut self, value: &Operation) {
-        match value {
-            Operation::UpsertDirectory {
-                id,
-                generation,
-                record,
-            } => self.upsert(1, *id, *generation, record),
-            Operation::UpsertFile {
-                id,
-                generation,
-                record,
-            } => self.upsert(2, *id, *generation, record),
-            Operation::UpsertSymlink {
-                id,
-                generation,
-                record,
-            } => self.upsert(3, *id, *generation, record),
-            Operation::Delete {
-                id,
-                path,
-                expected_kind,
-            } => {
-                self.u8(4);
-                self.u64(id.get());
-                self.path(path);
-                self.entry_kind(*expected_kind);
-            }
-        }
-    }
-
-    fn upsert(&mut self, tag: u8, id: OperationId, generation: Generation, record: &IndexRecord) {
-        self.u8(tag);
-        self.u64(id.get());
-        self.u32(generation.get());
-        self.record(record);
     }
 }

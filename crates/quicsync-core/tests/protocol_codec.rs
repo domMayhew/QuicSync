@@ -6,7 +6,7 @@ use quicsync_core::{
             Requirement,
         },
     },
-    types::{Digest, SessionId},
+    types::SessionId,
 };
 
 fn limits() -> CodecLimits {
@@ -44,10 +44,9 @@ fn control_messages_round_trip() {
             nonce: [3; 32],
         },
         Control::StartAccepted,
-        Control::PlanEnd {
-            operation_count: 42,
-            plan_digest: Digest::from_bytes([9; 32]),
-        },
+        Control::PlanEnd,
+        Control::CommitRequest,
+        Control::CompleteAck,
     ];
 
     for message in messages {
@@ -157,10 +156,7 @@ fn unordered_set_fields_are_noncanonical() {
 
 #[test]
 fn stream_categories_use_distinct_message_kinds() {
-    let index = IndexMessage::End {
-        count: 0,
-        manifest_digest: Digest::from_bytes([1; 32]),
-    };
+    let index = IndexMessage::End;
     let transfer = FileTransfer::Literal(vec![1, 2, 3]);
 
     assert_eq!(
