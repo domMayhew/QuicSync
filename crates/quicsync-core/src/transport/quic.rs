@@ -7,7 +7,7 @@
 //! bounded byte chunks and leaves framing and meaning to `protocol`.
 //!
 //! A clean close is not success. Completion stays [`Completion::Unknown`] until the caller records
-//! an observed `CompleteAck`, so orchestration must query the session rather than assume it ran.
+//! an observed `CompleteAck`. Report an unknown outcome; the user can start a fresh sync.
 
 use std::{
     future::Future,

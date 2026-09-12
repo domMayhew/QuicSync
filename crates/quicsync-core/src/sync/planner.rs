@@ -1,146 +1,114 @@
-//! Deterministic synchronization planning.
+//! Incremental merge planning over independently produced indexes.
+
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
-    protocol::messages::{Operation, canonical_plan_digest},
-    types::{Digest, EntryKind, Generation, IndexRecord, OperationId, RelativePath},
+    error::{ErrorCode, QuicSyncError},
+    protocol::messages::{IndexMessage, Operation},
+    types::{EntryKind, Generation, IndexRecord, OperationId, Phase},
 };
 
-/// A deterministic plan for making the destination match the source index.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Plan {
-    operations: Vec<Operation>,
-    digest: Digest,
-}
-
-impl Plan {
-    pub fn operations(&self) -> &[Operation] {
-        &self.operations
-    }
-
-    pub fn into_operations(self) -> Vec<Operation> {
-        self.operations
-    }
-
-    pub const fn digest(&self) -> Digest {
-        self.digest
-    }
-}
-
-/// Compares source and destination indexes and returns the required operations.
+/// Streams operations in canonical merge order with one lookahead record per input.
 ///
-/// The MVP implementation materializes the operation list, but it assumes callers provide
-/// canonical scanner order so planning itself remains a single merge walk.
-pub fn plan(source: &[IndexRecord], destination: &[IndexRecord]) -> Plan {
-    debug_assert!(is_strictly_ordered(source));
-    debug_assert!(is_strictly_ordered(destination));
+/// Run producers and the consumer concurrently using bounded channels. Inputs must
+/// be strictly ordered by path and explicitly end with `End`. A dropped producer
+/// is a failure, not evidence that the remaining tree is empty.
+/// Operations are discovery order, not commit order: a directory deletion can
+/// precede its descendants. The consumer schedules filesystem dependencies.
+pub async fn plan(
+    mut source: Receiver<Result<IndexMessage, QuicSyncError>>,
+    mut destination: Receiver<Result<IndexMessage, QuicSyncError>>,
+    output: Sender<Operation>,
+) -> Result<(), QuicSyncError> {
+    let mut left = read(&mut source).await?;
+    let mut right = read(&mut destination).await?;
+    let mut next_id = 0;
 
-    let mut planner = Planner::default();
-    let mut source_index = 0;
-    let mut destination_index = 0;
-
-    while source_index < source.len() || destination_index < destination.len() {
-        match (source.get(source_index), destination.get(destination_index)) {
-            (Some(source_record), Some(destination_record)) => {
-                match source_record.path.cmp(&destination_record.path) {
-                    std::cmp::Ordering::Less => {
-                        planner.upsert(source_record.clone());
-                        source_index += 1;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        planner.delete(
-                            destination_record.path.clone(),
-                            destination_record.metadata.kind(),
-                        );
-                        destination_index += 1;
-                    }
-                    std::cmp::Ordering::Equal => {
-                        planner.reconcile(source_record, destination_record);
-                        source_index += 1;
-                        destination_index += 1;
-                    }
+    loop {
+        let (consume_source, consume_destination) = match (&left, &right) {
+            (Some(a), Some(b)) => (a.path <= b.path, b.path <= a.path),
+            (Some(_), None) => (true, false),
+            (None, Some(_)) => (false, true),
+            (None, None) => return Ok(()),
+        };
+        let a = if consume_source { left.take() } else { None };
+        let b = if consume_destination {
+            right.take()
+        } else {
+            None
+        };
+        if a != b {
+            if let Some(record) = b {
+                if a.as_ref().map(|a| a.metadata.kind()) != Some(record.metadata.kind()) {
+                    send(
+                        &output,
+                        Operation::Delete {
+                            id: id(&mut next_id),
+                            expected_kind: record.metadata.kind(),
+                            path: record.path,
+                        },
+                    )
+                    .await?;
                 }
             }
-            (Some(source_record), None) => {
-                planner.upsert(source_record.clone());
-                source_index += 1;
+            if let Some(record) = a {
+                let id = id(&mut next_id);
+                let generation = Generation::new(0);
+                let operation = match record.metadata.kind() {
+                    EntryKind::Directory => Operation::UpsertDirectory {
+                        id,
+                        generation,
+                        record,
+                    },
+                    EntryKind::RegularFile => Operation::UpsertFile {
+                        id,
+                        generation,
+                        record,
+                    },
+                    EntryKind::Symlink => Operation::UpsertSymlink {
+                        id,
+                        generation,
+                        record,
+                    },
+                };
+                send(&output, operation).await?;
             }
-            (None, Some(destination_record)) => {
-                planner.delete(
-                    destination_record.path.clone(),
-                    destination_record.metadata.kind(),
-                );
-                destination_index += 1;
-            }
-            (None, None) => break,
         }
-    }
-
-    planner.finish()
-}
-
-#[derive(Default)]
-struct Planner {
-    operations: Vec<Operation>,
-}
-
-impl Planner {
-    fn finish(self) -> Plan {
-        let digest = canonical_plan_digest(&self.operations);
-        Plan {
-            operations: self.operations,
-            digest,
+        if consume_source {
+            left = read(&mut source).await?;
         }
-    }
-
-    fn reconcile(&mut self, source: &IndexRecord, destination: &IndexRecord) {
-        if source == destination {
-            return;
+        if consume_destination {
+            right = read(&mut destination).await?;
         }
-        if source.metadata.kind() != destination.metadata.kind() {
-            self.delete(destination.path.clone(), destination.metadata.kind());
-        }
-        self.upsert(source.clone());
-    }
-
-    fn upsert(&mut self, record: IndexRecord) {
-        let id = self.next_operation_id();
-        let generation = Generation::new(0);
-        let operation = match record.metadata.kind() {
-            EntryKind::Directory => Operation::UpsertDirectory {
-                id,
-                generation,
-                record,
-            },
-            EntryKind::RegularFile => Operation::UpsertFile {
-                id,
-                generation,
-                record,
-            },
-            EntryKind::Symlink => Operation::UpsertSymlink {
-                id,
-                generation,
-                record,
-            },
-        };
-        self.operations.push(operation);
-    }
-
-    fn delete(&mut self, path: RelativePath, expected_kind: EntryKind) {
-        let id = self.next_operation_id();
-        self.operations.push(Operation::Delete {
-            id,
-            path,
-            expected_kind,
-        });
-    }
-
-    fn next_operation_id(&self) -> OperationId {
-        OperationId::new(self.operations.len() as u64)
     }
 }
 
-fn is_strictly_ordered(records: &[IndexRecord]) -> bool {
-    records
-        .windows(2)
-        .all(|pair| pair[0].path < pair[1].path)
+async fn read(
+    input: &mut Receiver<Result<IndexMessage, QuicSyncError>>,
+) -> Result<Option<IndexRecord>, QuicSyncError> {
+    match input
+        .recv()
+        .await
+        .ok_or_else(|| failure("index closed before End"))??
+    {
+        IndexMessage::Record(record) => Ok(Some(record)),
+        IndexMessage::End => Ok(None),
+    }
+}
+
+async fn send(output: &Sender<Operation>, operation: Operation) -> Result<(), QuicSyncError> {
+    output
+        .send(operation)
+        .await
+        .map_err(|_| failure("operation consumer closed"))
+}
+
+fn id(next: &mut u64) -> OperationId {
+    let id = OperationId::new(*next);
+    *next += 1;
+    id
+}
+
+fn failure(message: &str) -> QuicSyncError {
+    QuicSyncError::new(ErrorCode::OperationFailed, Some(Phase::Planning), message)
 }
