@@ -142,10 +142,25 @@ fn operations_and_transfer_messages_round_trip_without_recovery_fields() {
             symlink_target: None,
         };
         let op = match kind {
-            EntryKind::RegularFile => Operation::UpsertFile { id, record },
+            EntryKind::RegularFile => Operation::UpsertFile {
+                id,
+                record,
+                update: false,
+            },
             EntryKind::Directory => Operation::UpsertDirectory { id, record },
             EntryKind::Symlink => Operation::UpsertSymlink { id, record },
         };
+        if let Operation::UpsertFile { record, .. } = &op {
+            let update = Control::Operation(Operation::UpsertFile {
+                id,
+                record: record.clone(),
+                update: true,
+            });
+            assert_eq!(
+                decode::<Control>(&encode(&update, &limits()).unwrap(), &limits()).unwrap(),
+                update
+            );
+        }
         let message = Control::Operation(op);
         assert_eq!(
             decode::<Control>(&encode(&message, &limits()).unwrap(), &limits()).unwrap(),
@@ -153,11 +168,16 @@ fn operations_and_transfer_messages_round_trip_without_recovery_fields() {
         );
     }
     let messages = [
-        FileTransfer::FileRequest { id, path },
+        FileTransfer::UpdateRequest {
+            id,
+            path: path.clone(),
+        },
+        FileTransfer::CreateRequest { id, path },
+        FileTransfer::WholeFile(vec![1, 2, 3]),
         FileTransfer::Signature(vec![1, 2, 3]),
         FileTransfer::SignatureEnd,
         FileTransfer::Delta(vec![1, 2, 3]),
-        FileTransfer::DeltaEnd,
+        FileTransfer::TransferEnd,
         FileTransfer::TransferAccepted { id },
     ];
     for message in messages {

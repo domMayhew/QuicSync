@@ -55,7 +55,10 @@ fn source_only_records_are_upserted_by_kind() {
     assert_eq!(plan.len(), 3);
     assert!(matches!(plan[0], Operation::UpsertSymlink { .. }));
     assert!(matches!(plan[1], Operation::UpsertDirectory { .. }));
-    assert!(matches!(plan[2], Operation::UpsertFile { .. }));
+    assert!(matches!(
+        plan[2],
+        Operation::UpsertFile { update: false, .. }
+    ));
 }
 
 #[test]
@@ -97,7 +100,7 @@ fn changed_records_are_upserted() {
     assert_eq!(plan.len(), 1);
     assert!(matches!(
         &plan[0],
-        Operation::UpsertFile { record, .. } if record.digest == Some(Digest::from_bytes([2; 32]))
+        Operation::UpsertFile { record, update: true, .. } if record.digest == Some(Digest::from_bytes([2; 32]))
     ));
 }
 
@@ -114,7 +117,10 @@ fn type_replacements_delete_then_upsert() {
             ..
         } if operation_path == &path("node")
     ));
-    assert!(matches!(&plan[1], Operation::UpsertFile { .. }));
+    assert!(matches!(
+        &plan[1],
+        Operation::UpsertFile { update: false, .. }
+    ));
 }
 
 #[test]

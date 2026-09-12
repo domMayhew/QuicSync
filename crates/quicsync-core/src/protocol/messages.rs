@@ -33,7 +33,7 @@ pub enum Control {
     Failure(WireFailure),
 }
 
-/// One item on the ordered destination-index stream.
+/// One item on the ordered source-index stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IndexMessage {
     Record(IndexRecord),
@@ -48,6 +48,7 @@ pub enum Operation {
         record: IndexRecord,
     },
     UpsertFile {
+        update: bool,
         id: OperationId,
         record: IndexRecord,
     },
@@ -85,11 +86,13 @@ impl Operation {
 /// Messages on one file stream. Signature/delta bytes use librsync's own format.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileTransfer {
-    FileRequest { id: OperationId, path: RelativePath },
+    UpdateRequest { id: OperationId, path: RelativePath },
+    CreateRequest { id: OperationId, path: RelativePath },
+    WholeFile(Vec<u8>),
     Signature(Vec<u8>),
     SignatureEnd,
     Delta(Vec<u8>),
-    DeltaEnd,
+    TransferEnd,
     TransferAccepted { id: OperationId },
 }
 

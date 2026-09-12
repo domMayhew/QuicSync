@@ -2,7 +2,7 @@
 use quicsync_core::{
     auth::{Identity, PeerPin, client_tls, server_tls},
     config::{DEFAULT_LIMITS, Limits},
-    filesystem::paths::RootHandle,
+    filesystem::{paths::RootHandle, staging::StagingArea},
     protocol::{
         codec::{CodecLimits, Decoder, encode},
         messages::FileTransfer,
@@ -67,29 +67,33 @@ async fn real_quic_delta_transfers_reconstruct_changed_empty_and_new_files() {
             (Some(basis), changed),
             (Some(vec![42; 32]), Vec::new()),
             (None, vec![7; 200_000]),
+            (None, Vec::new()),
         ] {
             fs::write(input.path().join("file"), &new).unwrap();
+            let update = old.is_some();
+            let original = old.clone();
             if let Some(old) = old {
                 fs::write(output.path().join("file"), old).unwrap();
             } else {
                 let _ = fs::remove_file(output.path().join("file"));
             }
-            let file = fs::File::open(input.path().join("file")).unwrap();
+            let source_root = Arc::new(RootHandle::open(input.path()).unwrap());
             let path = RelativePath::new(vec![b"file".to_vec()]).unwrap();
             let sending = async {
                 send_file(
-                    source.transfers.open().await.unwrap(),
-                    OperationId::new(1),
-                    path.clone(),
-                    file,
+                    source.transfers.accept().await.unwrap().unwrap(),
+                    source_root,
                     &DEFAULT_LIMITS,
                 )
                 .await
             };
             let receiving = async {
                 receive_file(
-                    destination.transfers.accept().await.unwrap().unwrap(),
-                    root.clone(),
+                    destination.transfers.open().await.unwrap(),
+                    Arc::new(StagingArea::new(root.clone()).unwrap()),
+                    OperationId::new(1),
+                    path.clone(),
+                    update,
                     &DEFAULT_LIMITS,
                 )
                 .await
@@ -98,6 +102,7 @@ async fn real_quic_delta_transfers_reconstruct_changed_empty_and_new_files() {
             sent.unwrap();
             let received = received.unwrap();
             assert_eq!(received.path, path);
+            assert_eq!(fs::read(output.path().join("file")).ok(), original);
             received
                 .file
                 .install(
@@ -119,14 +124,10 @@ async fn clean_transport_eof_without_delta_end_does_not_accept_a_file() {
         let (source, destination) = pair().await;
         let output = TempDir::new().unwrap();
         let root = Arc::new(RootHandle::open(output.path()).unwrap());
+        fs::write(output.path().join("file"), b"basis").unwrap();
         let sender = async {
-            let mut wire = source.transfers.open().await.unwrap();
+            let mut wire = source.transfers.accept().await.unwrap().unwrap();
             let codec = CodecLimits::from(&Limits::default());
-            let request = FileTransfer::FileRequest {
-                id: OperationId::new(1),
-                path: RelativePath::new(vec![b"file".to_vec()]).unwrap(),
-            };
-            wire.send(&encode(&request, &codec).unwrap()).await.unwrap();
             let mut decoder = Decoder::<FileTransfer>::new(codec);
             let mut buffer = [0; 8192];
             let mut signature = Vec::new();
@@ -134,6 +135,7 @@ async fn clean_transport_eof_without_delta_end_does_not_accept_a_file() {
                 let n = wire.receive(&mut buffer).await.unwrap().unwrap();
                 for message in decoder.push(&buffer[..n]).unwrap() {
                     match message {
+                        FileTransfer::UpdateRequest { .. } => {}
                         FileTransfer::Signature(bytes) => signature.extend(bytes),
                         FileTransfer::SignatureEnd => break 'signature,
                         _ => panic!("unexpected message"),
@@ -152,15 +154,22 @@ async fn clean_transport_eof_without_delta_end_does_not_accept_a_file() {
             let _ = wire.receive(&mut buffer).await;
         };
         let receiver = async {
-            let wire = destination.transfers.accept().await.unwrap().unwrap();
+            let wire = destination.transfers.open().await.unwrap();
             assert!(
-                receive_file(wire, root.clone(), &DEFAULT_LIMITS)
-                    .await
-                    .is_err()
+                receive_file(
+                    wire,
+                    Arc::new(StagingArea::new(root.clone()).unwrap()),
+                    OperationId::new(1),
+                    RelativePath::new(vec![b"file".to_vec()]).unwrap(),
+                    true,
+                    &DEFAULT_LIMITS
+                )
+                .await
+                .is_err()
             );
         };
         tokio::join!(sender, receiver);
-        assert!(!output.path().join("file").exists());
+        assert_eq!(fs::read(output.path().join("file")).unwrap(), b"basis");
     })
     .await
     .unwrap();

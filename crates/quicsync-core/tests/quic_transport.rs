@@ -142,6 +142,69 @@ fn bounds_are_derived_from_local_configuration_limits() {
 }
 
 #[tokio::test]
+async fn rejected_early_notification_fails_without_retransmission() {
+    use quicsync_core::transport::quic::connect_early_to;
+    timeout(Duration::from_secs(10), async {
+        let a_dir = tempdir().unwrap();
+        let b_dir = tempdir().unwrap();
+        let a = Identity::load_or_create(a_dir.path()).unwrap();
+        let b = Identity::load_or_create(b_dir.path()).unwrap();
+        let tls = client_tls(&a, PeerPin::new(b.fingerprint())).unwrap();
+        let listener = listen_on(
+            loopback(),
+            server_tls(&b, [PeerPin::new(a.fingerprint())]).unwrap(),
+            bounds(),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        let (source, destination) = tokio::join!(
+            connect_early_to(
+                listener.local_address().unwrap(),
+                tls.clone(),
+                bounds(),
+                CancellationToken::new()
+            ),
+            listener.accept()
+        );
+        let source = source.unwrap();
+        assert!(!source.attempted_early_data());
+        let mut streams = source.open_session().await.unwrap();
+        streams.control.send(b"notification").await.unwrap();
+        let mut peer = destination.unwrap().accept_session().await.unwrap();
+        peer.control.receive(&mut [0; 64]).await.unwrap();
+        peer.control.send(b"accepted").await.unwrap();
+        streams.control.receive(&mut [0; 64]).await.unwrap();
+        // New server configuration has no cached TLS sessions, as after a daemon restart.
+        let restarted = listen_on(
+            loopback(),
+            server_tls(&b, [PeerPin::new(a.fingerprint())]).unwrap(),
+            bounds(),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        let (source, destination) = tokio::join!(
+            connect_early_to(
+                restarted.local_address().unwrap(),
+                tls,
+                bounds(),
+                CancellationToken::new()
+            ),
+            restarted.accept_early()
+        );
+        let source = source.unwrap();
+        let destination = destination.unwrap();
+        assert!(source.attempted_early_data());
+        let mut streams = source.open_session().await.unwrap();
+        let _ = streams.control.send(b"early notification").await;
+        assert!(source.confirm_handshake().await.is_err());
+        source.cancel();
+        drop(destination);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn a_pinned_peer_completes_a_control_round_trip() {
     let pair = connected_pair().await;
 
@@ -228,7 +291,7 @@ async fn frames_larger_than_the_local_limit_are_refused_before_transmission() {
 }
 
 #[tokio::test]
-async fn the_destination_index_streams_in_bounded_chunks() {
+async fn the_source_index_streams_in_bounded_chunks() {
     let total = 4 * 1024 * 1024;
     let pair = connected_pair().await;
     let (mut source, mut destination) = session(&pair).await;
@@ -237,17 +300,17 @@ async fn the_destination_index_streams_in_bounded_chunks() {
         let chunk = vec![7; FRAME_BYTES];
         let mut written = 0;
         while written < total {
-            destination.index.send(&chunk).await.unwrap();
+            source.index.send(&chunk).await.unwrap();
             written += chunk.len();
         }
-        destination.index.finish().await.unwrap();
-        destination
+        source.index.finish().await.unwrap();
+        source
     });
 
     // A single small buffer receives the whole index: buffering never grows with it.
     let mut buffer = [0; 1024];
     let mut received = 0;
-    while let Some(read) = source.destination_index.receive(&mut buffer).await.unwrap() {
+    while let Some(read) = destination.source_index.receive(&mut buffer).await.unwrap() {
         assert!(read <= buffer.len());
         assert!(buffer[..read].iter().all(|byte| *byte == 7));
         received += read;
@@ -265,17 +328,17 @@ async fn control_stays_responsive_while_transfers_are_saturated() {
     // Saturate every permitted transfer with a peer that never reads them.
     let mut saturating = Vec::new();
     for _ in 0..PARALLEL_TRANSFERS {
-        let mut stream = source.transfers.open().await.unwrap();
+        let mut stream = destination.transfers.open().await.unwrap();
         saturating.push(tokio::spawn(async move {
             let chunk = vec![1; FRAME_BYTES];
             while stream.send(&chunk).await.is_ok() {}
         }));
     }
-    assert_eq!(source.transfers.available_permits(), 0);
+    assert_eq!(destination.transfers.available_permits(), 0);
 
     // A further transfer must wait rather than allocate another stream.
     let blocked = tokio::spawn({
-        let transfers = source.transfers.clone();
+        let transfers = destination.transfers.clone();
         async move { transfers.open().await }
     });
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -321,21 +384,21 @@ async fn control_stays_responsive_while_transfers_are_saturated() {
 
 #[tokio::test]
 async fn a_released_transfer_permit_admits_the_next_transfer() {
-    // The destination permits more streams than the source does, so only the source's own
+    // The source permits more streams than the destination does, so only the destination's own
     // parallelism bound can delay the third transfer.
     let pair = connected_pair_with(
-        bounds(),
         TransportBounds::new(FRAME_BYTES, 8, INFLIGHT_BYTES).unwrap(),
+        bounds(),
     )
     .await;
-    let (source, _destination) = session(&pair).await;
+    let (_source, destination) = session(&pair).await;
 
-    let first = source.transfers.open().await.unwrap();
-    let second = source.transfers.open().await.unwrap();
-    assert_eq!(source.transfers.available_permits(), 0);
+    let first = destination.transfers.open().await.unwrap();
+    let second = destination.transfers.open().await.unwrap();
+    assert_eq!(destination.transfers.available_permits(), 0);
 
     let waiting = tokio::spawn({
-        let transfers = source.transfers.clone();
+        let transfers = destination.transfers.clone();
         async move { transfers.open().await }
     });
     drop(first);
@@ -353,11 +416,11 @@ async fn transfer_streams_round_trip_between_peers() {
     let pair = connected_pair().await;
     let (source, destination) = session(&pair).await;
 
-    let mut outgoing = source.transfers.open().await.unwrap();
+    let mut outgoing = destination.transfers.open().await.unwrap();
     outgoing.send(b"file-request").await.unwrap();
     outgoing.finish().await.unwrap();
 
-    let mut incoming = destination.transfers.accept().await.unwrap().unwrap();
+    let mut incoming = source.transfers.accept().await.unwrap().unwrap();
     let mut buffer = [0; FRAME_BYTES];
     let read = incoming.receive(&mut buffer).await.unwrap().unwrap();
     assert_eq!(&buffer[..read], b"file-request");
@@ -365,14 +428,14 @@ async fn transfer_streams_round_trip_between_peers() {
 }
 
 #[tokio::test]
-async fn accepting_transfers_ends_when_the_source_closes_its_session() {
+async fn accepting_transfers_ends_when_the_destination_closes_its_session() {
     let pair = connected_pair().await;
     let (source, destination) = session(&pair).await;
 
-    drop(source);
-    drop(pair.source);
+    drop(destination);
+    drop(pair.destination);
 
-    let accepted = timeout(Duration::from_secs(5), destination.transfers.accept())
+    let accepted = timeout(Duration::from_secs(5), source.transfers.accept())
         .await
         .expect("a closed session must end the accept loop")
         .unwrap();
@@ -382,8 +445,8 @@ async fn accepting_transfers_ends_when_the_source_closes_its_session() {
 #[tokio::test]
 async fn cancellation_stops_producers_and_consumers_on_every_stream() {
     let pair = connected_pair().await;
-    let (mut source, mut destination) = session(&pair).await;
-    let mut transfer = source.transfers.open().await.unwrap();
+    let (mut source, destination) = session(&pair).await;
+    let mut transfer = destination.transfers.open().await.unwrap();
 
     pair.cancel.cancel();
 
@@ -402,11 +465,11 @@ async fn cancellation_stops_producers_and_consumers_on_every_stream() {
         ErrorCode::Cancelled
     );
     assert_eq!(
-        source.transfers.open().await.unwrap_err().code(),
+        destination.transfers.open().await.unwrap_err().code(),
         ErrorCode::Cancelled
     );
     assert_eq!(
-        destination.index.send(b"record").await.unwrap_err().code(),
+        source.index.send(b"record").await.unwrap_err().code(),
         ErrorCode::Cancelled
     );
 }

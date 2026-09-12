@@ -1,5 +1,36 @@
 #![cfg(unix)]
 
+#[test]
+fn many_completed_files_share_the_staging_directory_and_close_payload_descriptors() {
+    use quicsync_core::filesystem::{paths::RootHandle, staging::StagingArea};
+    use std::{fs, sync::Arc};
+    let root = tempfile::tempdir().unwrap();
+    let area = StagingArea::new(Arc::new(RootHandle::open(root.path()).unwrap())).unwrap();
+    let files = (0..256)
+        .map(|_| area.receive(b"pending".as_slice()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fs::read_dir(root.path().join(".quicsync")).unwrap().count(),
+        files.len()
+    );
+    #[cfg(target_os = "linux")]
+    for fd in fs::read_dir("/proc/self/fd").unwrap() {
+        if let Ok(path) = fs::read_link(fd.unwrap().path()) {
+            assert!(
+                !(path.starts_with(root.path())
+                    && path
+                        .file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with("incoming-")))
+            );
+        }
+    }
+    drop(files);
+    assert_eq!(
+        fs::read_dir(root.path().join(".quicsync")).unwrap().count(),
+        0
+    );
+}
+
 use quicsync_core::{
     filesystem::{paths::RootHandle, staging::StagedFile},
     types::{EntryKind, EntryMetadata, RelativePath},

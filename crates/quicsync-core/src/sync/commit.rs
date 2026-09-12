@@ -10,9 +10,41 @@ use crate::{
     types::{EntryKind, EntryMetadata, IndexRecord, RelativePath},
 };
 use rustix::fs::{AtFlags, Mode, OFlags, Timespec, Timestamps, UTIME_OMIT};
-use std::{ffi::CString, fs::File};
+use std::{collections::BTreeMap, ffi::CString, fs::File};
 
-/// Holds only active directory dependencies; ordinary files install immediately.
+/// In-memory changes retained while transfers stage. Dropping this leaves live paths untouched.
+#[derive(Default)]
+pub struct PendingCommit {
+    changes: BTreeMap<crate::types::OperationId, (Operation, Option<StagedFile>)>,
+}
+
+impl PendingCommit {
+    pub fn stage(
+        &mut self,
+        operation: Operation,
+        file: Option<StagedFile>,
+    ) -> Result<(), QuicSyncError> {
+        if matches!(&operation, Operation::UpsertFile { .. }) != file.is_some() {
+            return Err(failure("only file upserts require a staged file"));
+        }
+        if self.changes.contains_key(&operation.id()) {
+            return Err(failure("duplicate staged operation"));
+        }
+        self.changes.insert(operation.id(), (operation, file));
+        Ok(())
+    }
+
+    /// Caller invokes only after planning and all transfer workers succeed.
+    pub fn commit(self, root: RootHandle) -> Result<(), QuicSyncError> {
+        let mut committer = Committer::new(root);
+        for (_, (operation, file)) in self.changes {
+            committer.apply(operation, file)?;
+        }
+        committer.finish()
+    }
+}
+
+/// Executes dependency-ordered filesystem changes during the commit stage.
 ///
 /// Run on a blocking worker. Transfer scheduling is independent: supply a staged
 /// file with each UpsertFile once its transfer finishes. The operation input must

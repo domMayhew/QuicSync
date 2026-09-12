@@ -5,7 +5,7 @@ use crate::{
     error::{ErrorCode, QuicSyncError},
     filesystem::{
         paths::{RootHandle, open_regular},
-        staging::StagedFile,
+        staging::{StagedFile, StagingArea},
     },
     protocol::{
         codec::{self, CodecLimits, Decoder},
@@ -16,7 +16,6 @@ use crate::{
 };
 use std::{
     collections::VecDeque,
-    fs::File,
     io::{self, Cursor, Read, Seek, SeekFrom},
     sync::Arc,
 };
@@ -24,7 +23,7 @@ use tokio::sync::mpsc;
 
 const QUEUE: usize = 2;
 
-/// The caller installs this file when its filesystem dependencies permit.
+/// Kept private until all requested transfers have staged successfully.
 pub struct ReceivedFile {
     pub id: OperationId,
     pub path: RelativePath,
@@ -90,16 +89,42 @@ fn produce(
     }
 }
 
-/// Sends every regular file through delta, even when the destination basis is empty.
+/// Source responds to a destination-initiated create or update request.
 pub async fn send_file(
     stream: TransferStream,
-    id: OperationId,
-    path: RelativePath,
-    source: File,
+    root: Arc<RootHandle>,
     limits: &Limits,
 ) -> Result<(), QuicSyncError> {
     let mut wire = Wire::new(stream, limits)?;
-    wire.send(FileTransfer::FileRequest { id, path }).await?;
+    let (id, path, update) = match wire.next().await? {
+        FileTransfer::UpdateRequest { id, path } => (id, path, true),
+        FileTransfer::CreateRequest { id, path } => (id, path, false),
+        _ => return Err(failure("expected file request")),
+    };
+    let source = tokio::task::spawn_blocking(move || {
+        open_regular(&root, &path)
+            .and_then(|file| file.ok_or_else(|| failure("source file missing")))
+    })
+    .await
+    .map_err(failure)??;
+    if !update {
+        let (tx, mut rx) = mpsc::channel(QUEUE);
+        let chunk_size = wire.chunk_size;
+        let worker = tokio::task::spawn_blocking(move || produce(source, tx, chunk_size));
+        let sending = async {
+            while let Some(bytes) = rx.recv().await {
+                wire.send(FileTransfer::WholeFile(bytes)).await?;
+            }
+            Ok::<_, QuicSyncError>(())
+        };
+        tokio::try_join!(sending, async { worker.await.map_err(failure)? })?;
+        wire.send(FileTransfer::TransferEnd).await?;
+        wire.stream.finish().await?;
+        return match wire.next().await? {
+            FileTransfer::TransferAccepted { id: accepted } if id == accepted => Ok(()),
+            _ => Err(failure("expected transfer acknowledgment")),
+        };
+    }
     let (signature_tx, signature_rx) = mpsc::channel(QUEUE);
     let (delta_tx, mut delta_rx) = mpsc::channel(QUEUE);
     let chunk_size = wire.chunk_size;
@@ -133,7 +158,7 @@ pub async fn send_file(
     };
     let (_, result) = tokio::try_join!(exchange, async { worker.await.map_err(failure)? })?;
     let () = result;
-    wire.send(FileTransfer::DeltaEnd).await?;
+    wire.send(FileTransfer::TransferEnd).await?;
     wire.stream.finish().await?;
     match wire.next().await? {
         FileTransfer::TransferAccepted { id: accepted } if id == accepted => Ok(()),
@@ -141,25 +166,58 @@ pub async fn send_file(
     }
 }
 
-/// Receives one request, streams signatures, and reconstructs into private staging.
+/// Destination requests content and streams it into private staging.
 pub async fn receive_file(
     stream: TransferStream,
-    root: Arc<RootHandle>,
+    area: Arc<StagingArea>,
+    id: OperationId,
+    path: RelativePath,
+    update: bool,
     limits: &Limits,
 ) -> Result<ReceivedFile, QuicSyncError> {
     let mut wire = Wire::new(stream, limits)?;
-    let (id, path) = match wire.next().await? {
-        FileTransfer::FileRequest { id, path } => (id, path),
-        _ => return Err(failure("expected file request")),
-    };
-    let basis_root = root.clone();
+    wire.send(if update {
+        FileTransfer::UpdateRequest {
+            id,
+            path: path.clone(),
+        }
+    } else {
+        FileTransfer::CreateRequest {
+            id,
+            path: path.clone(),
+        }
+    })
+    .await?;
+    if !update {
+        let (tx, rx) = mpsc::channel(QUEUE);
+        let worker = tokio::task::spawn_blocking(move || area.receive(Input::new(rx)));
+        let receiving = async {
+            loop {
+                match wire.next().await? {
+                    FileTransfer::WholeFile(bytes) => {
+                        tx.send(Chunk::Data(bytes)).await.map_err(failure)?
+                    }
+                    FileTransfer::TransferEnd => {
+                        tx.send(Chunk::End).await.map_err(failure)?;
+                        return Ok::<_, QuicSyncError>(());
+                    }
+                    _ => return Err(failure("expected whole-file bytes")),
+                }
+            }
+        };
+        let (_, file) = tokio::try_join!(receiving, async { worker.await.map_err(failure)? })?;
+        wire.send(FileTransfer::TransferAccepted { id }).await?;
+        wire.stream.finish().await?;
+        return Ok(ReceivedFile { id, path, file });
+    }
+    let basis_area = area.clone();
     let basis_path = path.clone();
     let (signature_tx, mut signature_rx) = mpsc::channel(QUEUE);
     let chunk_size = wire.chunk_size;
     let worker = tokio::task::spawn_blocking(move || {
-        let mut basis: Box<dyn ReadSeek> = match open_regular(&basis_root, &basis_path)? {
+        let mut basis: Box<dyn ReadSeek> = match open_regular(basis_area.root(), &basis_path)? {
             Some(file) => Box::new(file),
-            None => Box::new(Cursor::new(Vec::<u8>::new())),
+            None => return Err(failure("update basis missing")),
         };
         let signature = librsync::Signature::new(&mut basis).map_err(failure)?;
         produce(signature, signature_tx, chunk_size)?;
@@ -178,7 +236,7 @@ pub async fn receive_file(
     let (delta_tx, delta_rx) = mpsc::channel(QUEUE);
     let worker = tokio::task::spawn_blocking(move || {
         let patch = librsync::Patch::new(basis, Input::new(delta_rx)).map_err(failure)?;
-        StagedFile::receive(&root, patch)
+        area.receive(patch)
     });
     let deltas = async {
         loop {
@@ -187,7 +245,7 @@ pub async fn receive_file(
                     .send(Chunk::Data(bytes))
                     .await
                     .map_err(|_| failure("patch worker stopped"))?,
-                FileTransfer::DeltaEnd => {
+                FileTransfer::TransferEnd => {
                     // librsync may finish at its internal terminator without requesting EOF.
                     let _ = delta_tx.send(Chunk::End).await;
                     return Ok::<_, QuicSyncError>(());

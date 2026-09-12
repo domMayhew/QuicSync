@@ -39,3 +39,26 @@ defaults; peer input cannot replace them.
 
 Available limits are `max_frame_bytes`, `max_path_bytes`, `max_components`,
 `max_parallel_hashes`, `max_parallel_transfers`, and `max_inflight_bytes`.
+
+## Running the POC
+
+Run `quicsync init SOURCE_ROOT` and `quicsyncd init SETUP_ROOT` to create
+private identities and print the compact fingerprints used in the configuration.
+Create the TOML files above with mode `0600`; initialization does not generate
+configuration or exchange pins automatically.
+
+Start `quicsyncd serve SETUP_ROOT`, then run `quicsync sync SOURCE_ROOT`.
+The daemon handles one attempt at a time; indexing, planning, transfer, and
+staging within that attempt run concurrently. It continues accepting fresh
+attempts after an error. Neither peer retries a failed attempt automatically.
+
+For repeated manual measurements, use `quicsync interactive SOURCE_ROOT`.
+Each Enter starts a fresh sync; EOF exits. The process retains TLS session
+tickets in memory so subsequent notifications can use 0-RTT. A new one-shot
+process starts cold; tickets are not persisted to disk. Rejected early data
+fails the attempt. The daemon must remain running to retain its TLS session
+cache. Filesystem watching and automatic synchronization are not implemented.
+
+Stage start/stop messages go to stderr. Completed files remain in private staging
+until all transfers finish; then the daemon commits file, directory, and symlink
+changes. Staging is not a transaction or rollback system.

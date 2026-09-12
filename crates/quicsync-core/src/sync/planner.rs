@@ -38,6 +38,9 @@ pub async fn plan(
             None
         };
         if a != b {
+            let update = b
+                .as_ref()
+                .is_some_and(|r| r.metadata.kind() == EntryKind::RegularFile);
             if let Some(record) = b {
                 if a.as_ref().map(|a| a.metadata.kind()) != Some(record.metadata.kind()) {
                     send(
@@ -55,7 +58,7 @@ pub async fn plan(
                 let id = id(&mut next_id);
                 let operation = match record.metadata.kind() {
                     EntryKind::Directory => Operation::UpsertDirectory { id, record },
-                    EntryKind::RegularFile => Operation::UpsertFile { id, record },
+                    EntryKind::RegularFile => Operation::UpsertFile { id, record, update },
                     EntryKind::Symlink => Operation::UpsertSymlink { id, record },
                 };
                 send(&output, operation).await?;

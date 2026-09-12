@@ -50,15 +50,15 @@ fn identities_are_created_once_and_have_stable_public_key_fingerprints() {
 }
 
 #[test]
-fn tls_is_mutual_pin_only_and_disables_early_data() {
+fn tls_is_mutual_pin_only_and_allows_early_notification() {
     let client = Identity::load_or_create(tempdir().unwrap().path()).unwrap();
     let server = Identity::load_or_create(tempdir().unwrap().path()).unwrap();
 
     let client_config = client_tls(&client, PeerPin::new(server.fingerprint())).unwrap();
     let server_config = server_tls(&server, [PeerPin::new(client.fingerprint())]).unwrap();
 
-    assert!(!client_config.enable_early_data);
-    assert_eq!(server_config.max_early_data_size, 0);
+    assert!(client_config.enable_early_data);
+    assert_eq!(server_config.max_early_data_size, u32::MAX);
 
     complete_handshake(
         client_config,
