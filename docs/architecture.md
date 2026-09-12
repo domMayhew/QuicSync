@@ -207,6 +207,11 @@ ignore rules. The scanner still hashes files for change detection; that is disti
 from reconstructed-file verification. Transport already frames records incrementally.
 HME-447 removes durable state, generations, retry/status machinery, capability
 negotiation, policy manifests and whole-file verification fields.
+HME-433 implements private descriptor-relative temporary files and per-file
+installation without result verification. HME-436 consumes canonical operations,
+installs ordinary files immediately and retains active directory dependencies
+until their subtrees end. Transfer scheduling must stay independent of the ordered
+installer, using a bounded window when transfers complete out of order.
 New transfer and orchestration work must compose these incremental producers.
 Do not use legacy code or completed ticket acceptance criteria to reintroduce
 superseded requirements. Keep this file and the Linear architecture resource identical.
