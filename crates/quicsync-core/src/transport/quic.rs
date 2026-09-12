@@ -1,6 +1,6 @@
 //! QUIC connections and session streams.
 //!
-//! One long-lived bidirectional control stream carries phase changes, the destination index uses
+//! One long-lived bidirectional control stream carries phase changes, the source index uses
 //! one unidirectional stream, and each file uses its own bidirectional transfer stream. Stream
 //! counts, pending opens, and buffered bytes are bounded locally, so memory never grows with the
 //! size of the synchronized tree. Nothing here interprets message payloads: the transport moves
@@ -22,7 +22,7 @@ use quinn::{
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
 use rustls::{ClientConfig, ServerConfig, pki_types::CertificateDer};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use crate::{
     auth::{self, Fingerprint, Identity, PeerPin},
@@ -159,9 +159,50 @@ pub async fn connect(
 /// Connects to `address`, presenting `tls` and enforcing `bounds` locally.
 pub async fn connect_to(
     address: SocketAddr,
+    tls: ClientConfig,
+    bounds: TransportBounds,
+    cancel: CancellationToken,
+) -> Result<Connection, QuicSyncError> {
+    dial(address, tls, bounds, cancel, false).await
+}
+
+/// Reuse this client for fresh syncs to retain TLS tickets in memory.
+pub struct SourceClient {
+    address: SocketAddr,
+    tls: ClientConfig,
+    bounds: TransportBounds,
+}
+impl SourceClient {
+    pub fn new(config: &SourceConfig, identity: &Identity) -> Result<Self, QuicSyncError> {
+        let pin = PeerPin::new(Fingerprint::from_bytes(*config.peer_pin().as_bytes()));
+        Ok(Self {
+            address: config.destination(),
+            tls: auth::client_tls(identity, pin)?,
+            bounds: TransportBounds::from_limits(config.limits()),
+        })
+    }
+    pub async fn connect(&self, cancel: CancellationToken) -> Result<Connection, QuicSyncError> {
+        connect_early_to(self.address, self.tls.clone(), self.bounds, cancel).await
+    }
+}
+
+/// Attempts early notification when the supplied TLS configuration has a cached ticket.
+/// Rejected early data fails the attempt; it is not retransmitted automatically.
+pub async fn connect_early_to(
+    address: SocketAddr,
+    tls: ClientConfig,
+    bounds: TransportBounds,
+    cancel: CancellationToken,
+) -> Result<Connection, QuicSyncError> {
+    dial(address, tls, bounds, cancel, true).await
+}
+
+async fn dial(
+    address: SocketAddr,
     mut tls: ClientConfig,
     bounds: TransportBounds,
     cancel: CancellationToken,
+    early: bool,
 ) -> Result<Connection, QuicSyncError> {
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let crypto = QuicClientConfig::try_from(tls)
@@ -179,8 +220,24 @@ pub async fn connect_to(
     let connecting = endpoint
         .connect_with(client, address, SERVER_NAME)
         .map_err(|error| unavailable(format!("start connection: {error}")))?;
+    let connecting = if early {
+        match connecting.into_0rtt() {
+            Ok((connection, handshake)) => {
+                return Ok(Connection::new_early(
+                    endpoint,
+                    connection,
+                    bounds,
+                    cancel,
+                    Some(handshake),
+                    true,
+                ));
+            }
+            Err(connecting) => connecting,
+        }
+    } else {
+        connecting
+    };
     let connection = guarded(&cancel, "connect to destination", connecting).await?;
-
     Ok(Connection::new(endpoint, connection, bounds, cancel))
 }
 
@@ -242,6 +299,15 @@ impl Listener {
 
     /// Completes one mutually authenticated handshake.
     pub async fn accept(&self) -> Result<Connection, QuicSyncError> {
+        self.accept_mode(false).await
+    }
+
+    /// Accepts notification before the handshake finishes. Confirm before serving requests.
+    pub async fn accept_early(&self) -> Result<Connection, QuicSyncError> {
+        self.accept_mode(true).await
+    }
+
+    async fn accept_mode(&self, early: bool) -> Result<Connection, QuicSyncError> {
         let incoming =
             guarded_infallible(&self.cancel, "accept connection", self.endpoint.accept())
                 .await?
@@ -249,6 +315,23 @@ impl Listener {
         let connecting = incoming
             .accept()
             .map_err(|error| error.describe("accept connection"))?;
+        let connecting = if early {
+            match connecting.into_0rtt() {
+                Ok((connection, handshake)) => {
+                    return Ok(Connection::new_early(
+                        self.endpoint.clone(),
+                        connection,
+                        self.bounds,
+                        self.cancel.child_token(),
+                        Some(handshake),
+                        false,
+                    ));
+                }
+                Err(connecting) => connecting,
+            }
+        } else {
+            connecting
+        };
         let connection = guarded(&self.cancel, "accept connection", connecting).await?;
         // Each accepted session gets its own token: losing one must not stop the others.
         Ok(Connection::new(
@@ -266,7 +349,6 @@ impl Listener {
 }
 
 /// Per-connection state shared by every stream of one session.
-#[derive(Debug)]
 struct Session {
     // Held so the endpoint driver outlives the connection it serves.
     _endpoint: Endpoint,
@@ -274,6 +356,18 @@ struct Session {
     bounds: TransportBounds,
     cancel: CancellationToken,
     transfer_permits: Arc<Semaphore>,
+    early_handshake: Mutex<Option<quinn::ZeroRttAccepted>>,
+    handshake_accepted: OnceCell<bool>,
+    attempted_early: bool,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("bounds", &self.bounds)
+            .field("attempted_early", &self.attempted_early)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Session {
@@ -312,6 +406,17 @@ impl Connection {
         bounds: TransportBounds,
         cancel: CancellationToken,
     ) -> Self {
+        Self::new_early(endpoint, connection, bounds, cancel, None, false)
+    }
+
+    fn new_early(
+        endpoint: Endpoint,
+        connection: quinn::Connection,
+        bounds: TransportBounds,
+        cancel: CancellationToken,
+        handshake: Option<quinn::ZeroRttAccepted>,
+        outgoing_early: bool,
+    ) -> Self {
         // Anything that ends the connection other than our own close cancels every producer and
         // consumer sharing this session. The watcher holds a connection handle, which
         // `Session::drop` closes, so the task always finishes.
@@ -329,7 +434,43 @@ impl Connection {
             bounds,
             cancel,
             transfer_permits: Arc::new(Semaphore::new(bounds.max_parallel_transfers)),
+            attempted_early: outgoing_early,
+            early_handshake: Mutex::new(handshake),
+            handshake_accepted: OnceCell::new(),
         }))
+    }
+
+    pub fn attempted_early_data(&self) -> bool {
+        self.0.attempted_early
+    }
+
+    /// Only StartSync may precede this gate. Rejection is a failed attempt, not a retry.
+    pub async fn confirm_handshake(&self) -> Result<(), QuicSyncError> {
+        let accepted = self
+            .0
+            .handshake_accepted
+            .get_or_try_init(|| async {
+                let mut handshake = self.0.early_handshake.lock().await;
+                match handshake.as_mut() {
+                    Some(handshake) => tokio::select! {
+                        accepted = handshake => Ok(accepted),
+                        _ = self.0.cancel.cancelled() => Err(self.0.interrupted("handshake")),
+                    },
+                    None => Ok(true),
+                }
+            })
+            .await?;
+        if let Some(error) = self.0.connection.close_reason() {
+            return Err(error.describe("handshake"));
+        }
+        // Quinn exposes an acceptance flag only for clients; the server value is unspecified.
+        if *accepted || !self.0.attempted_early {
+            Ok(())
+        } else {
+            Err(unavailable(
+                "early notification rejected; start a fresh sync",
+            ))
+        }
     }
 
     /// The authenticated public-key fingerprint presented by the peer.
@@ -360,14 +501,14 @@ impl Connection {
     pub async fn open_session(&self) -> Result<SourceStreams, QuicSyncError> {
         let (send, recv) =
             guarded_in(&self.0, "open control stream", self.0.connection.open_bi()).await?;
+        let index = guarded_in(&self.0, "open index stream", self.0.connection.open_uni()).await?;
         Ok(SourceStreams {
             control: ControlChannel::new(self.0.clone(), send, recv),
-            destination_index: IndexReader {
+            index: IndexWriter {
                 session: self.0.clone(),
-                stream: None,
-                finished: false,
+                stream: index,
             },
-            transfers: TransferOpener {
+            transfers: TransferAcceptor {
                 session: self.0.clone(),
             },
         })
@@ -381,14 +522,14 @@ impl Connection {
             self.0.connection.accept_bi(),
         )
         .await?;
-        let index = guarded_in(&self.0, "open index stream", self.0.connection.open_uni()).await?;
         Ok(DestinationStreams {
             control: ControlChannel::new(self.0.clone(), send, recv),
-            index: IndexWriter {
+            source_index: IndexReader {
                 session: self.0.clone(),
-                stream: index,
+                stream: None,
+                finished: false,
             },
-            transfers: TransferAcceptor {
+            transfers: TransferOpener {
                 session: self.0.clone(),
             },
         })
@@ -401,12 +542,12 @@ impl Connection {
     }
 }
 
-/// The streams a source drives: control, the destination's index, and outgoing transfers.
+/// The source sends its index and accepts file requests.
 #[derive(Debug)]
 pub struct SourceStreams {
     pub control: ControlChannel,
-    pub destination_index: IndexReader,
-    pub transfers: TransferOpener,
+    pub index: IndexWriter,
+    pub transfers: TransferAcceptor,
 }
 
 impl SourceStreams {
@@ -416,12 +557,12 @@ impl SourceStreams {
     }
 }
 
-/// The streams a destination serves: control, its own index, and incoming transfers.
+/// The destination receives the source index and opens file requests.
 #[derive(Debug)]
 pub struct DestinationStreams {
     pub control: ControlChannel,
-    pub index: IndexWriter,
-    pub transfers: TransferAcceptor,
+    pub source_index: IndexReader,
+    pub transfers: TransferOpener,
 }
 
 impl DestinationStreams {
@@ -478,7 +619,7 @@ impl ControlChannel {
         self.completion
     }
 
-    async fn close(mut self) -> Completion {
+    pub async fn close(mut self) -> Completion {
         if self.send.finish().is_ok() {
             // Wait for the peer to take the remaining bytes so closing does not discard them.
             let _ = guarded_in(&self.session, "flush control stream", self.send.stopped()).await;

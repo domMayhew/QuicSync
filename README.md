@@ -3,8 +3,9 @@
 QuicSync is a Rust performance proof of concept for low-latency file sync over
 QUIC. It tests whether streaming and pipelining scanning, indexing, planning,
 and delta transfer can outperform rsync for small to medium changes in medium
-to large codebases. Each stage starts producing useful work before its input
-is complete.
+to large codebases. Source streams its index; Destination plans and requests
+whole-file creates or delta updates. Scanning through staging is pipelined;
+commit waits until all transfers have staged before changing live paths.
 
 The source is authoritative. Failures stop the attempt; the user starts a fresh
 sync. Automatic retries, resumption, corruption recovery, journals, and durable

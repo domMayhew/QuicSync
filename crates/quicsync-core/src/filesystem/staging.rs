@@ -5,6 +5,7 @@ use std::{
     fs::{File, FileTimes},
     io::{self, Read},
     os::fd::OwnedFd,
+    sync::Arc,
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -17,11 +18,28 @@ use crate::{
     types::{EntryKind, EntryMetadata, RelativePath},
 };
 
+/// One shared descriptor for every pending file in a sync.
+pub struct StagingArea {
+    root: Arc<RootHandle>,
+    directory: Arc<OwnedFd>,
+}
+impl StagingArea {
+    pub fn new(root: Arc<RootHandle>) -> Result<Self, QuicSyncError> {
+        let directory = Arc::new(staging_directory(&root)?);
+        Ok(Self { root, directory })
+    }
+    pub fn root(&self) -> &RootHandle {
+        &self.root
+    }
+    pub fn receive(&self, content: impl Read) -> Result<StagedFile, QuicSyncError> {
+        StagedFile::receive_in(self.directory.clone(), content)
+    }
+}
+
 /// A completely written temporary file. Drop removes it unless installation succeeds.
 pub struct StagedFile {
-    directory: OwnedFd,
+    directory: Arc<OwnedFd>,
     name: CString,
-    file: File,
     installed: bool,
 }
 
@@ -30,8 +48,11 @@ impl StagedFile {
     ///
     /// Call from a blocking worker. The reader must report an interrupted transfer
     /// as an error rather than EOF. No expected size or digest is required.
-    pub fn receive(root: &RootHandle, mut content: impl Read) -> Result<Self, QuicSyncError> {
-        let directory = staging_directory(root)?;
+    pub fn receive(root: &RootHandle, content: impl Read) -> Result<Self, QuicSyncError> {
+        Self::receive_in(Arc::new(staging_directory(root)?), content)
+    }
+
+    fn receive_in(directory: Arc<OwnedFd>, mut content: impl Read) -> Result<Self, QuicSyncError> {
         let mut random = [0_u8; 16];
         SystemRandom::new()
             .fill(&mut random)
@@ -45,19 +66,19 @@ impl StagedFile {
         ))
         .unwrap();
         let descriptor = rustix::fs::openat(
-            &directory,
+            &*directory,
             name.as_c_str(),
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )
         .map_err(failure)?;
-        let mut staged = Self {
+        let staged = Self {
             directory,
             name,
-            file: File::from(descriptor),
             installed: false,
         };
-        io::copy(&mut content, &mut staged.file).map_err(failure)?;
+        let mut file = File::from(descriptor);
+        io::copy(&mut content, &mut file).map_err(failure)?;
         Ok(staged)
     }
 
@@ -73,11 +94,18 @@ impl StagedFile {
                 "regular-file staging requires regular-file metadata",
             ));
         }
-        set_file_metadata(&self.file, metadata)?;
+        let descriptor = rustix::fs::openat(
+            &*self.directory,
+            self.name.as_c_str(),
+            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(failure)?;
+        set_file_metadata(&File::from(descriptor), metadata)?;
         let parent = resolve_parent(root, path)?;
         let leaf = CString::new(parent.leaf()).unwrap();
         rustix::fs::renameat(
-            &self.directory,
+            &*self.directory,
             self.name.as_c_str(),
             parent.as_fd(),
             leaf.as_c_str(),
@@ -91,7 +119,7 @@ impl StagedFile {
 impl Drop for StagedFile {
     fn drop(&mut self) {
         if !self.installed {
-            let _ = rustix::fs::unlinkat(&self.directory, self.name.as_c_str(), AtFlags::empty());
+            let _ = rustix::fs::unlinkat(&*self.directory, self.name.as_c_str(), AtFlags::empty());
         }
     }
 }

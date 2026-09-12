@@ -420,7 +420,9 @@ impl Writer<'_> {
     fn operation(&mut self, value: &Operation) -> Result<(), CodecError> {
         match value {
             Operation::UpsertDirectory { id, record } => self.upsert(1, *id, record),
-            Operation::UpsertFile { id, record } => self.upsert(2, *id, record),
+            Operation::UpsertFile { id, record, update } => {
+                self.upsert(if *update { 5 } else { 2 }, *id, record)
+            }
             Operation::UpsertSymlink { id, record } => self.upsert(3, *id, record),
             Operation::Delete {
                 id,
@@ -574,11 +576,15 @@ impl<'a> Reader<'a> {
         let tag = self.u8()?;
         let id = OperationId::new(self.u64()?);
         match tag {
-            1..=3 => {
+            1..=3 | 5 => {
                 let record = self.record()?;
                 Ok(match tag {
                     1 => Operation::UpsertDirectory { id, record },
-                    2 => Operation::UpsertFile { id, record },
+                    2 | 5 => Operation::UpsertFile {
+                        id,
+                        record,
+                        update: tag == 5,
+                    },
                     _ => Operation::UpsertSymlink { id, record },
                 })
             }
@@ -670,25 +676,27 @@ impl WireMessage for IndexMessage {
 impl WireMessage for FileTransfer {
     fn kind(&self) -> u8 {
         match self {
-            Self::FileRequest { .. } => 1,
+            Self::UpdateRequest { .. } => 1,
+            Self::CreateRequest { .. } => 7,
+            Self::WholeFile(_) => 8,
             Self::Signature(_) => 2,
             Self::SignatureEnd => 3,
             Self::Delta(_) => 4,
-            Self::DeltaEnd => 5,
+            Self::TransferEnd => 5,
             Self::TransferAccepted { .. } => 6,
         }
     }
     fn encode_fields(&self, writer: &mut Writer<'_>) -> Result<(), CodecError> {
         match self {
-            Self::FileRequest { id, path } => {
+            Self::UpdateRequest { id, path } | Self::CreateRequest { id, path } => {
                 writer.u64(id.get());
                 writer.path(path)
             }
-            Self::Signature(bytes) | Self::Delta(bytes) => {
+            Self::Signature(bytes) | Self::Delta(bytes) | Self::WholeFile(bytes) => {
                 writer.bytes(bytes);
                 Ok(())
             }
-            Self::SignatureEnd | Self::DeltaEnd => Ok(()),
+            Self::SignatureEnd | Self::TransferEnd => Ok(()),
             Self::TransferAccepted { id } => {
                 writer.u64(id.get());
                 Ok(())
@@ -697,17 +705,22 @@ impl WireMessage for FileTransfer {
     }
     fn decode_fields(kind: u8, reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         match kind {
-            1 => Ok(Self::FileRequest {
+            1 => Ok(Self::UpdateRequest {
                 id: OperationId::new(reader.u64()?),
                 path: reader.path()?,
             }),
             2 => Ok(Self::Signature(reader.bytes()?)),
             3 => Ok(Self::SignatureEnd),
             4 => Ok(Self::Delta(reader.bytes()?)),
-            5 => Ok(Self::DeltaEnd),
+            5 => Ok(Self::TransferEnd),
             6 => Ok(Self::TransferAccepted {
                 id: OperationId::new(reader.u64()?),
             }),
+            7 => Ok(Self::CreateRequest {
+                id: OperationId::new(reader.u64()?),
+                path: reader.path()?,
+            }),
+            8 => Ok(Self::WholeFile(reader.bytes()?)),
             _ => Err(CodecError::UnknownMessageKind(kind)),
         }
     }

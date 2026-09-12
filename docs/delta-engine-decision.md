@@ -12,11 +12,13 @@ materialize complete files/deltas in application memory.
 
 Delta construction loads one basis signature table before matching that file.
 This is a per-active-file prerequisite, not an index/plan barrier. Bound active
-file concurrency. With no destination basis, generate a signature for an empty
-reader and use the same delta path, producing literal content.
+file concurrency. Under the revised pipeline, Destination requests deltas for
+updates and supplies the basis signatures. Creates request whole-file bytes;
+they do not build empty-basis signatures or run the delta engine.
 
 The signature stream's clean end must be distinguished from a reset. Likewise,
-only successful delta completion makes StagedFile ready for installation. No
+only successful transfer completion makes StagedFile ready for the commit stage.
+Installation waits until all transfers are staged, not just this file. No
 extra result digest/size check or recovery state is required.
 
 ## Dependency evidence

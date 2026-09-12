@@ -328,7 +328,7 @@ pub fn client_tls(identity: &Identity, expected: PeerPin) -> Result<ClientConfig
             identity.private_key.clone_key(),
         )
         .map_err(tls_configuration_error)?;
-    config.enable_early_data = false;
+    config.enable_early_data = true;
     Ok(config)
 }
 
@@ -355,7 +355,7 @@ pub fn server_tls(
             identity.private_key.clone_key(),
         )
         .map_err(tls_configuration_error)?;
-    config.max_early_data_size = 0;
+    config.max_early_data_size = u32::MAX;
     Ok(config)
 }
 

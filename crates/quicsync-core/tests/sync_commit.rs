@@ -5,7 +5,7 @@ use quicsync_core::{
     error::QuicSyncError,
     filesystem::{paths::RootHandle, scan::scan_root, staging::StagedFile},
     protocol::messages::{IndexMessage, Operation},
-    sync::{commit::Committer, planner::plan},
+    sync::{commit::PendingCommit, planner::plan},
     types::IndexRecord,
 };
 use std::{
@@ -24,7 +24,7 @@ async fn sync(source: &Path, destination: &Path) -> Result<(), QuicSyncError> {
     let destination_path = destination.to_owned();
     let install = tokio::task::spawn_blocking(move || {
         let root = RootHandle::open(&destination_path)?;
-        let mut commit = Committer::new(RootHandle::open(&destination_path)?);
+        let mut commit = PendingCommit::default();
         while let Some(operation) = output_rx.blocking_recv() {
             let staged = if let Operation::UpsertFile { record, .. } = &operation {
                 let relative: PathBuf = record
@@ -41,7 +41,7 @@ async fn sync(source: &Path, destination: &Path) -> Result<(), QuicSyncError> {
             } else {
                 None
             };
-            commit.apply(operation, staged)?;
+            commit.stage(operation, staged)?;
         }
         Ok::<_, QuicSyncError>(commit)
     });
@@ -55,7 +55,7 @@ async fn sync(source: &Path, destination: &Path) -> Result<(), QuicSyncError> {
     a?;
     b?;
     p?;
-    c.unwrap()?.finish()
+    c.unwrap()?.commit(RootHandle::open(destination)?)
 }
 
 async fn index(root: &Path) -> Vec<IndexRecord> {

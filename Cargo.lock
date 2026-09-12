@@ -407,6 +407,8 @@ name = "quicsync"
 version = "0.1.0"
 dependencies = [
  "quicsync-core",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -434,6 +436,8 @@ name = "quicsyncd"
 version = "0.1.0"
 dependencies = [
  "quicsync-core",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
