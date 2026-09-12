@@ -1,4 +1,4 @@
-//! Filesystem indexing for stable MVP sync roots.
+//! Streamed filesystem indexing for stable POC sync roots.
 
 use std::{
     ffi::OsString,
@@ -7,6 +7,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use tokio::sync::mpsc::Sender;
+
 use crate::{
     config::{Limits, ValidatedRoot},
     error::{ErrorCode, ErrorContext, QuicSyncError},
@@ -14,31 +16,62 @@ use crate::{
         ignore::{IgnoreDecision, IgnorePolicy},
         metadata,
     },
+    protocol::messages::IndexMessage,
     types::{Digest, EntryKind, IndexRecord, RelativePath},
 };
 
-/// Scans a validated root path into deterministic root-relative index records.
-pub fn scan_validated_root(
+/// Runs blocking traversal off the async runtime and streams canonical records.
+pub async fn scan_validated_root(
     root: &ValidatedRoot,
     configured_exclusions: &[String],
     limits: &Limits,
-) -> Result<Vec<IndexRecord>, QuicSyncError> {
-    scan_root(root.path(), configured_exclusions, limits)
+    output: Sender<Result<IndexMessage, QuicSyncError>>,
+) -> Result<(), QuicSyncError> {
+    scan_root(root.path(), configured_exclusions, limits, output).await
 }
 
-/// Scans `root` into root-relative index records.
+/// Produces records through a bounded channel while consumers run concurrently.
 ///
-/// This MVP scanner is intentionally synchronous and assumes the tree is stable while it runs.
-pub fn scan_root(
+/// The caller must join this future and consume the channel concurrently. Filesystem
+/// work runs on a blocking worker. Success emits End; errors never emit End.
+/// Memory holds the active directories' sorted entries and ignore rules, not an index.
+pub async fn scan_root(
     root: &Path,
     configured_exclusions: &[String],
     limits: &Limits,
-) -> Result<Vec<IndexRecord>, QuicSyncError> {
-    let mut policy = IgnorePolicy::with_configured_exclusions(configured_exclusions)?;
-    let mut records = Vec::new();
-    scan_directory(root, None, &mut policy, limits, &mut records)?;
-    records.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(records)
+    output: Sender<Result<IndexMessage, QuicSyncError>>,
+) -> Result<(), QuicSyncError> {
+    let root = root.to_owned();
+    let exclusions = configured_exclusions.to_vec();
+    let limits = *limits;
+    tokio::task::spawn_blocking(move || {
+        let result = (|| {
+            let mut policy = IgnorePolicy::with_configured_exclusions(&exclusions)?;
+            scan_directory(&root, None, &mut policy, &limits, &output)?;
+            emit(&output, IndexMessage::End)
+        })();
+        if let Err(error) = &result {
+            let _ = output.blocking_send(Err(error.clone()));
+        }
+        result
+    })
+    .await
+    .map_err(|error| {
+        QuicSyncError::new(
+            ErrorCode::OperationFailed,
+            None,
+            format!("scanner worker failed: {error}"),
+        )
+    })?
+}
+
+fn emit(
+    output: &Sender<Result<IndexMessage, QuicSyncError>>,
+    message: IndexMessage,
+) -> Result<(), QuicSyncError> {
+    output
+        .blocking_send(Ok(message))
+        .map_err(|_| QuicSyncError::new(ErrorCode::OperationFailed, None, "index consumer closed"))
 }
 
 fn scan_directory(
@@ -46,21 +79,10 @@ fn scan_directory(
     scope: Option<&RelativePath>,
     policy: &mut IgnorePolicy,
     limits: &Limits,
-    records: &mut Vec<IndexRecord>,
+    output: &Sender<Result<IndexMessage, QuicSyncError>>,
 ) -> Result<(), QuicSyncError> {
     let directory = root.join(relative_to_path(scope));
-    let ignore_file = directory.join(".gitignore");
-    if ignore_file.is_file() {
-        let contents = fs::read(&ignore_file).map_err(|error| {
-            QuicSyncError::new(
-                ErrorCode::Io,
-                None,
-                format!("cannot read '{}': {error}", ignore_file.display()),
-            )
-        })?;
-        policy.add_ignore_contents(scope.cloned(), contents)?;
-    }
-
+    let checkpoint = policy.checkpoint();
     let mut entries = fs::read_dir(&directory)
         .map_err(|error| {
             QuicSyncError::new(
@@ -86,7 +108,38 @@ fn scan_directory(
             .cmp(right.file_name().as_bytes())
     });
 
+    // Discover ignore files from this directory's enumeration, without following links.
+    if let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.file_name() == ".gitignore")
+    {
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            QuicSyncError::new(
+                ErrorCode::Io,
+                None,
+                format!("cannot inspect ignore file: {error}"),
+            )
+        })?;
+        if metadata.is_file() {
+            let contents = fs::read(entry.path()).map_err(|error| {
+                QuicSyncError::new(
+                    ErrorCode::Io,
+                    None,
+                    format!("cannot read ignore file: {error}"),
+                )
+            })?;
+            policy.add_ignore_contents(scope.cloned(), contents)?;
+        }
+    }
+
     for entry in entries {
+        if output.is_closed() {
+            return Err(QuicSyncError::new(
+                ErrorCode::OperationFailed,
+                None,
+                "index consumer closed",
+            ));
+        }
         let name = entry.file_name().as_bytes().to_vec();
         let path = append_component(scope, name, limits)?;
         let full_path = entry.path();
@@ -99,18 +152,22 @@ fn scan_directory(
         }
 
         let digest = digest_for(&full_path, entry_metadata.kind(), symlink_target.as_deref())?;
-        records.push(IndexRecord {
-            path: path.clone(),
-            metadata: entry_metadata,
-            digest,
-            symlink_target,
-        });
+        emit(
+            output,
+            IndexMessage::Record(IndexRecord {
+                path: path.clone(),
+                metadata: entry_metadata,
+                digest,
+                symlink_target,
+            }),
+        )?;
 
         if entry_metadata.kind() == EntryKind::Directory {
-            scan_directory(root, Some(&path), policy, limits, records)?;
+            scan_directory(root, Some(&path), policy, limits, output)?;
         }
     }
 
+    policy.restore(checkpoint);
     Ok(())
 }
 

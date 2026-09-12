@@ -202,9 +202,12 @@ the upstream index/plan is complete. Use small bounded channels to expose
 accidental full-stage buffering. Test malformed/truncated framing as an ordinary
 failure, without building corruption-recovery or resume workflows.
 
-Existing code is ahead of this intended scope in some areas and behind it in
-streaming. Track cleanup explicitly: convert the materialized scanner and any
-remaining stages to streamed production; remove unused durable state, generations,
+HME-434 streams planning and HME-448 streams filesystem indexing on a blocking
+worker through bounded channels, with per-directory sorting and active-scope
+ignore rules. The scanner still hashes files for change detection; that is distinct
+from reconstructed-file verification. Transport already frames records incrementally.
+HME-447 tracks remaining legacy cleanup: remove unused durable state, generations,
 retry/status machinery, capability negotiation and whole-file verification fields.
+New transfer and orchestration work must compose these incremental producers.
 Do not use legacy code or completed ticket acceptance criteria to reintroduce
 superseded requirements. Keep this file and the Linear architecture resource identical.
