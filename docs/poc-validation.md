@@ -25,6 +25,9 @@ file's inode, and stage start/stop messages. This is process-level correctness
 coverage; the gated library tests separately prove payload can precede index End.
 CI runs this smoke test after the workspace tests.
 
+HME-454 adds an 8 MiB file to exercise a larger whole-file create followed by a
+delta update. The local timing table below predates that addition.
+
 ## Local Evidence
 
 Tested binaries at d3b52f4 (including the HME-443 CLI changes), debug profile,

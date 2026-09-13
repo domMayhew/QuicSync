@@ -16,3 +16,8 @@ rust-version = "1.98.1"
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
 quicsync-core = { version = "0.1.0", path = "crates/quicsync-core" }
+
+# HME-454: 0.11.17 rejects contiguous buffered data under normal backpressure.
+# Remove this override once a crates.io release includes the compaction fix.
+[patch.crates-io]
+quinn-proto = { git = "https://github.com/quinn-rs/quinn.git", rev = "b826169972971a4a18a7a7d32694d7d90483068b" }

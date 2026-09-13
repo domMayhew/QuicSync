@@ -428,6 +428,37 @@ async fn transfer_streams_round_trip_between_peers() {
 }
 
 #[tokio::test]
+async fn a_backpressured_large_transfer_remains_readable() {
+    timeout(Duration::from_secs(20), async {
+        let defaults = TransportBounds::from_limits(&DEFAULT_LIMITS);
+        let pair = connected_pair_with(defaults, defaults).await;
+        let (source, destination) = session(&pair).await;
+        let mut outgoing = destination.transfers.open().await.unwrap();
+        outgoing.send(b"start").await.unwrap();
+        let mut incoming = source.transfers.accept().await.unwrap().unwrap();
+        let writer = tokio::spawn(async move {
+            for _ in 0..128 {
+                outgoing.send(&vec![7; 64 * 1024]).await.unwrap();
+            }
+            outgoing.finish().await.unwrap();
+        });
+        // Simulate staging/delta work applying backpressure to the network reader.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 64 * 1024];
+        while let Some(read) = incoming.receive(&mut buffer).await.unwrap() {
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+        assert_eq!(&bytes[..5], b"start");
+        assert_eq!(bytes.len(), 5 + 8 * 1024 * 1024);
+        assert!(bytes[5..].iter().all(|&byte| byte == 7));
+        writer.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn accepting_transfers_ends_when_the_destination_closes_its_session() {
     let pair = connected_pair().await;
     let (source, destination) = session(&pair).await;
