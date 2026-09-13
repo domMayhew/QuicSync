@@ -24,7 +24,7 @@ impl From<u64> for OperationId {
 
 /// A BLAKE3 digest.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Digest([u8; 32]);
+pub struct Digest([u8; 32]); // TODO: @gpt We don't need digests for the POC, right?
 
 impl Digest {
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {

@@ -25,6 +25,15 @@ pub enum IgnoreDecision {
     Protected,
 }
 
+// TODO: HME-451 Would it be better to use a single GitIgnoreBuilder, and only build when necessary.
+// Could we do it where we keep a GitIgnoreBuilder _and_ a GitIgnore. We use the GitIgnore as-is
+// if there have been no changes, and append a new file to the GitignoreBuilder when we encounter
+// a new ignore file, building a new GitIgnore at that time?
+// So we'd only ever have to apply a single GitIgnore, and we'd build a new one from the previous GitIgnoreBuilder
+// when needed. I seem to remember that copying or cloning  GitIgnoreBuilder is cheap, so we could
+// clone when needed instead of mutating to allow other directories to see their own correct version.
+// We'll need to benchmark both approaches, but it's probably not high priority.
+
 /// Ignore rules accumulated by the active filesystem traversal.
 #[derive(Clone, Debug)]
 pub struct IgnorePolicy {

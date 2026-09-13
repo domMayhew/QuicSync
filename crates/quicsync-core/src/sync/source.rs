@@ -50,6 +50,9 @@ async fn run_inner(connection: &Connection, config: &SourceConfig) -> Result<(),
             tx,
         ),
     );
+    // TODO: @gpt what are the performance implications of having this tx/rx pair? Would it be better
+    // to have `scan_root` call `index.send` directly? If the way we have it is a cleaner
+    // implementation and the performance implications are minimal we can leave it.
     let indexing = async {
         connection.confirm_handshake().await?;
         while let Some(message) = rx.recv().await {
