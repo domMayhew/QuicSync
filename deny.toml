@@ -35,4 +35,5 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# HME-454: exact revision pinned in Cargo.toml until the upstream fix is released.
+allow-git = ["https://github.com/quinn-rs/quinn.git"]

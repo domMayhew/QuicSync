@@ -65,6 +65,8 @@ done
 mkdir "$src/empty"
 ln -s package-0/file-0 "$src/link"
 chmod 755 "$src/package-0/file-0"
+# Cover transfer buffering beyond the small per-file fixture (HME-454).
+dd if=/dev/zero of="$src/large-file" bs=1048576 count=8 status=none
 
 sync_once() {
     (cd "$src" && timeout 60 "$source_bin" sync) > "$work/$1.log" 2>&1
@@ -87,6 +89,7 @@ verify
 [[ $(stat -c %i "$dst/package-0/file-0") = "$inode" ]]
 
 printf 'small edit\n' >> "$src/package-0/file-0"
+printf 'large-file delta edit\n' >> "$src/large-file"
 rm "$src/package-0/file-1"
 rmdir "$src/empty"
 mkdir "$src/new-directory"
