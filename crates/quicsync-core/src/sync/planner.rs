@@ -41,18 +41,18 @@ pub async fn plan(
             let update = b
                 .as_ref()
                 .is_some_and(|r| r.metadata.kind() == EntryKind::RegularFile);
-            if let Some(record) = b {
-                if a.as_ref().map(|a| a.metadata.kind()) != Some(record.metadata.kind()) {
-                    send(
-                        &output,
-                        Operation::Delete {
-                            id: id(&mut next_id),
-                            expected_kind: record.metadata.kind(),
-                            path: record.path,
-                        },
-                    )
-                    .await?;
-                }
+            if let Some(record) = b
+                && a.as_ref().map(|a| a.metadata.kind()) != Some(record.metadata.kind())
+            {
+                send(
+                    &output,
+                    Operation::Delete {
+                        id: id(&mut next_id),
+                        expected_kind: record.metadata.kind(),
+                        path: record.path,
+                    },
+                )
+                .await?;
             }
             if let Some(record) = a {
                 let id = id(&mut next_id);

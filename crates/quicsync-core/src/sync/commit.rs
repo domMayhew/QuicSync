@@ -168,11 +168,11 @@ impl Committer {
     }
 
     fn defer(&mut self, path: RelativePath, action: Action) {
-        if let Some(directory) = self.pending.last_mut() {
-            if directory.path == path {
-                directory.actions.push(action);
-                return;
-            }
+        if let Some(directory) = self.pending.last_mut()
+            && directory.path == path
+        {
+            directory.actions.push(action);
+            return;
         }
         self.pending.push(Directory {
             path,
