@@ -37,6 +37,13 @@ root IDs and pins, symbolic-link roots, insecure administrative permissions,
 and zero or excessive resource limits. Omitted limits use conservative local
 defaults; peer input cannot replace them.
 
+To print an existing identity's fingerprint, run
+`scripts/identity-pin.sh SYNC_ROOT` from the QuicSync repository (omit
+`SYNC_ROOT` when already in that root). The script reads only
+`.quicsync/identity.crt`. Put the **destination's** fingerprint in the source's
+`peer_pin`, and the **source's** fingerprint in the destination's
+`authorized_peers`.
+
 Available limits are `max_frame_bytes`, `max_path_bytes`, `max_components`,
 `max_parallel_hashes`, `max_parallel_transfers`, and `max_inflight_bytes`.
 
