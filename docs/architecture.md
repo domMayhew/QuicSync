@@ -244,3 +244,32 @@ Do not use legacy code or completed ticket acceptance criteria to reintroduce
 superseded requirements. Linear project/milestone descriptions define scope;
 this repository document holds technical details. The former Linear architecture
 resource is archived and is no longer a second maintained copy.
+
+## Review Notes (HME-453)
+
+The current scanner computes whole-file BLAKE3 hashes on both machines to
+detect content changes even when size and timestamps match. This reads every
+regular file on every attempt, including no-change attempts: O(total included
+file bytes) I/O and hashing, in addition to traversal. Changed files are read
+again during transfer. This may dominate a small-change sync in a large tree;
+its measured cost is not yet known. Benchmark it before choosing a metadata-only
+comparison tradeoff; filesystem watching is a separate milestone. These hashes
+are neither librsync's block checksums nor reconstructed-file verification.
+
+The scanner-to-index channel moves owned records from a blocking filesystem
+worker to asynchronous network writes. Its bounded capacity limits how far the
+scan can lead the network, and a full queue suspends the worker. Sending directly
+from traversal would still require bridging blocking and async work. There is
+one enqueue/dequeue per record and scheduling overhead, but no measured claim
+that this overhead is negligible or that removing it would improve latency.
+Keep the boundary until profiling identifies a bottleneck.
+
+Operation IDs correlate in-flight transfer acknowledgments and restore canonical
+commit order after out-of-order staging. They are local to an attempt, not
+persistent request IDs, replay protection, journals, or operation counts.
+
+Handshake confirmation uses a OnceCell to serialize initialization and cache
+the result. Only its initializer locks the mutable Quinn handshake future;
+there is no reverse lock acquisition. Concurrent cold/resumed confirmation is
+covered by a timeout-bounded pipeline test. The outgoing client's attempted-early
+flag governs rejection handling; Quinn's server acceptance boolean is not used.
