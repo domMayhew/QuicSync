@@ -103,6 +103,10 @@ jobs:
         run: rustup toolchain install $RUSTUP_TOOLCHAIN --profile minimal
       - name: Test workspace
         run: cargo test --locked --workspace --all-targets
+      - name: Build process smoke binaries
+        run: cargo build --locked --workspace --bins
+      - name: Smoke test real source and destination processes
+        run: bash scripts/poc-smoke.sh
 
   artifacts:
     name: Artifacts
