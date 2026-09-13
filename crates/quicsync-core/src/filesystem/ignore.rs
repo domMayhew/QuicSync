@@ -26,6 +26,7 @@ pub enum IgnoreDecision {
 }
 
 // this is a test base PR
+// this is a test not base PR
 
 // TODO: HME-451 Would it be better to use a single GitIgnoreBuilder, and only build when necessary.
 // Could we do it where we keep a GitIgnoreBuilder _and_ a GitIgnore. We use the GitIgnore as-is
