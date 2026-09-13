@@ -24,6 +24,9 @@ impl From<u64> for OperationId {
 
 /// Whole-file (or symlink-target) BLAKE3 hash used to detect index changes.
 /// Not a transfer-integrity check or a librsync block checksum.
+/// TODO(HME-453): revisit full-tree hashing before settling the long-term change
+/// detector; see docs/architecture.md, "Review Notes (HME-453)", for its I/O cost
+/// and the metadata-only comparison tradeoff.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Digest([u8; 32]);
 

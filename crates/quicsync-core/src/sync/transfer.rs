@@ -168,8 +168,8 @@ pub async fn send_file(
 
 /// Destination requests content and streams it into private staging.
 ///
-/// `id` correlates the in-flight acknowledgment and restores canonical commit
-/// order when parallel transfers finish out of order; it is not a recovery ID.
+/// `id` correlates the in-flight acknowledgment; it does not prescribe commit
+/// order and is not a recovery ID.
 /// `is_update` means the destination has a regular-file basis for delta patching.
 /// Otherwise the destination requests whole-file bytes for a new file.
 pub async fn receive_file(

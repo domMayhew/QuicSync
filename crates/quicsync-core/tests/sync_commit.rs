@@ -25,6 +25,7 @@ async fn sync(source: &Path, destination: &Path) -> Result<(), QuicSyncError> {
     let install = tokio::task::spawn_blocking(move || {
         let root = RootHandle::open(&destination_path)?;
         let mut commit = PendingCommit::default();
+        let mut completed = Vec::new();
         while let Some(operation) = output_rx.blocking_recv() {
             let staged = if let Operation::UpsertFile { record, .. } = &operation {
                 let relative: PathBuf = record
@@ -41,6 +42,11 @@ async fn sync(source: &Path, destination: &Path) -> Result<(), QuicSyncError> {
             } else {
                 None
             };
+            completed.push((operation, staged));
+        }
+        // Exercise arbitrary staging order, including children before parents and
+        // replacements before their deletions. Operation IDs must not sort commit.
+        for (operation, staged) in completed.into_iter().rev() {
             commit.stage(operation, staged)?;
         }
         Ok::<_, QuicSyncError>(commit)
@@ -75,7 +81,7 @@ async fn index(root: &Path) -> Vec<IndexRecord> {
 }
 
 #[tokio::test]
-async fn streamed_operations_handle_nested_deletions_and_type_replacements() {
+async fn reverse_staging_order_handles_nested_deletions_and_type_replacements() {
     let source = TempDir::new().unwrap();
     let destination = TempDir::new().unwrap();
     fs::write(source.path().join("a"), b"directory to file").unwrap();
