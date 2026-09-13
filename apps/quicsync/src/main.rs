@@ -1,10 +1,37 @@
+use clap::{Parser, Subcommand};
 use quicsync_core::{
     auth::Identity,
     config::load_source,
     sync::source,
     transport::{CancellationToken, quic::SourceClient},
 };
-use std::{env, error::Error, io, path::PathBuf};
+use std::{error::Error, io, path::PathBuf};
+
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Create a private identity and print its fingerprint.
+    Init {
+        #[arg(default_value = ".")]
+        root: PathBuf,
+    },
+    /// Run one sync from this source.
+    Sync {
+        #[arg(default_value = ".")]
+        root: PathBuf,
+    },
+    /// Run a fresh sync on each Enter.
+    Interactive {
+        #[arg(default_value = ".")]
+        root: PathBuf,
+    },
+}
 
 #[tokio::main]
 async fn main() {
@@ -14,17 +41,12 @@ async fn main() {
     }
 }
 
-// TODO: @gpt use clap crate
 async fn run() -> Result<(), Box<dyn Error>> {
-    let mut args = env::args_os().skip(1);
-    let command = args
-        .next()
-        .ok_or("usage: quicsync <init|sync|interactive> ROOT")?;
-    let root = PathBuf::from(args.next().ok_or("missing ROOT")?);
-    if args.next().is_some() {
-        return Err("unexpected argument".into());
-    }
-    if command == "init" {
+    let command = Cli::parse().command;
+    let root = match &command {
+        Command::Init { root } | Command::Sync { root } | Command::Interactive { root } => root,
+    };
+    if matches!(command, Command::Init { .. }) {
         let identity = Identity::load_or_create(&root.join(".quicsync"))?;
         println!(
             "{}",
@@ -37,10 +59,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         );
         return Ok(());
     }
-    if command != "sync" && command != "interactive" {
-        return Err("unknown command".into());
-    }
-    let config = load_source(&root)?;
+    let config = load_source(root)?;
     let identity = Identity::load_or_create(
         config
             .private_key()
@@ -49,7 +68,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     )?;
     let client = SourceClient::new(&config, &identity)?;
     loop {
-        if command == "interactive" {
+        if matches!(command, Command::Interactive { .. }) {
             eprintln!("Enter to sync; EOF to exit.");
             let read =
                 tokio::task::spawn_blocking(|| io::stdin().read_line(&mut String::new())).await??;
@@ -61,7 +80,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         let connection = client.connect(CancellationToken::new()).await?;
         source::run(&connection, &config).await?;
         eprintln!("sync complete ({:?})", start.elapsed());
-        if command == "sync" {
+        if matches!(command, Command::Sync { .. }) {
             return Ok(());
         }
     }
