@@ -264,9 +264,14 @@ one enqueue/dequeue per record and scheduling overhead, but no measured claim
 that this overhead is negligible or that removing it would improve latency.
 Keep the boundary until profiling identifies a bottleneck.
 
-Operation IDs correlate in-flight transfer acknowledgments and restore canonical
-commit order after out-of-order staging. They are local to an attempt, not
-persistent request IDs, replay protection, journals, or operation counts.
+Operation IDs correlate in-flight transfer acknowledgments only. They are local
+to an attempt, not commit sequencing, persistent request IDs, replay protection,
+journals, or operation counts. Canonical ordering is required for streamed index
+comparison, not commit. Commit accepts arbitrary staging-completion order and
+enforces only filesystem dependencies: delete children before parents, remove old
+types before replacements, create parents before children, and restore directory
+metadata after child changes. Independent file installations follow completion
+order without path or operation-ID sorting.
 
 Handshake confirmation uses a OnceCell to serialize initialization and cache
 the result. Only its initializer locks the mutable Quinn handshake future;

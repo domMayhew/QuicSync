@@ -1,4 +1,4 @@
-//! Incremental filesystem installation in canonical discovery order.
+//! Filesystem installation after staging, ordered only by filesystem dependencies.
 
 use crate::{
     error::{ErrorCode, QuicSyncError},
@@ -7,15 +7,15 @@ use crate::{
         staging::{StagedFile, set_file_metadata},
     },
     protocol::messages::Operation,
-    types::{EntryKind, EntryMetadata, IndexRecord, RelativePath},
+    types::{EntryKind, IndexRecord, RelativePath},
 };
 use rustix::fs::{AtFlags, Mode, OFlags, Timespec, Timestamps, UTIME_OMIT};
-use std::{collections::BTreeMap, ffi::CString, fs::File};
+use std::{ffi::CString, fs::File};
 
 /// In-memory changes retained while transfers stage. Dropping this leaves live paths untouched.
 #[derive(Default)]
 pub struct PendingCommit {
-    changes: BTreeMap<crate::types::OperationId, (Operation, Option<StagedFile>)>,
+    changes: Vec<(Operation, Option<StagedFile>)>,
 }
 
 impl PendingCommit {
@@ -27,185 +27,97 @@ impl PendingCommit {
         if matches!(&operation, Operation::UpsertFile { .. }) != file.is_some() {
             return Err(failure("only file upserts require a staged file"));
         }
-        if self.changes.contains_key(&operation.id()) {
-            return Err(failure("duplicate staged operation"));
-        }
-        self.changes.insert(operation.id(), (operation, file));
+        self.changes.push((operation, file));
         Ok(())
     }
 
-    /// Caller invokes only after planning and all transfer workers succeed.
+    /// Caller invokes on a blocking worker only after planning and all transfers succeed.
+    /// Independent paths have no required order; IDs are not used for scheduling.
     pub fn commit(self, root: RootHandle) -> Result<(), QuicSyncError> {
-        let mut committer = Committer::new(root);
-        for (_, (operation, file)) in self.changes {
-            committer.apply(operation, file)?;
-        }
-        committer.finish()
-    }
-}
-
-/// Executes dependency-ordered filesystem changes during the commit stage.
-///
-/// Run on a blocking worker. Transfer scheduling is independent: supply a staged
-/// file with each UpsertFile once its transfer finishes. The operation input must
-/// retain planner order, even when transfers finish out of order.
-pub struct Committer {
-    root: RootHandle,
-    pending: Vec<Directory>,
-    previous: Option<RelativePath>,
-}
-
-struct Directory {
-    path: RelativePath,
-    actions: Vec<Action>,
-}
-enum Action {
-    Delete,
-    Metadata(EntryMetadata),
-    File(StagedFile, EntryMetadata),
-    Symlink(IndexRecord),
-}
-
-impl Committer {
-    pub fn new(root: RootHandle) -> Self {
-        Self {
-            root,
-            pending: Vec::new(),
-            previous: None,
-        }
-    }
-
-    pub fn apply(
-        &mut self,
-        operation: Operation,
-        file: Option<StagedFile>,
-    ) -> Result<(), QuicSyncError> {
-        let path = operation.path().clone();
-        if self
-            .previous
-            .as_ref()
-            .is_some_and(|previous| previous > &path)
-        {
-            return Err(failure("operations are not in canonical discovery order"));
-        }
-        if matches!(&operation, Operation::UpsertFile { .. }) != file.is_some() {
-            return Err(failure("only file upserts require a staged file"));
-        }
-        while self
-            .pending
-            .last()
-            .is_some_and(|directory| !path.components().starts_with(directory.path.components()))
-        {
-            self.finish_directory()?;
-        }
-        self.previous = Some(path.clone());
-        match operation {
-            Operation::Delete {
-                expected_kind: EntryKind::Directory,
-                ..
-            } => {
-                self.defer(path, Action::Delete);
-            }
-            Operation::Delete { .. } => self.unlink(&path, AtFlags::empty())?,
-            Operation::UpsertDirectory { record, .. } => {
-                let parent = resolve_parent(&self.root, &path)?;
-                let leaf = CString::new(parent.leaf()).unwrap();
-                match rustix::fs::mkdirat(
-                    parent.as_fd(),
-                    leaf.as_c_str(),
-                    Mode::from_raw_mode(0o700),
-                ) {
-                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                    Err(error) => return Err(failure(error)),
+        let installer = Installer { root };
+        let mut deletions = Vec::new();
+        let mut directories = Vec::new();
+        let mut contents = Vec::new();
+        for (operation, file) in self.changes {
+            match operation {
+                Operation::Delete {
+                    path,
+                    expected_kind,
+                    ..
+                } => {
+                    deletions.push((path, expected_kind));
                 }
-                // Open without following links and keep the directory writable while adding children.
-                let fd = rustix::fs::openat(
-                    parent.as_fd(),
-                    leaf.as_c_str(),
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
+                Operation::UpsertDirectory { record, .. } => directories.push(record),
+                _ => contents.push((operation, file)),
+            }
+        }
+        // Remove children before parents, including directory-to-file replacements.
+        deletions.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().len()));
+        for (path, kind) in deletions {
+            installer.unlink(
+                &path,
+                if kind == EntryKind::Directory {
+                    AtFlags::REMOVEDIR
+                } else {
+                    AtFlags::empty()
+                },
+            )?;
+        }
+        // Create writable parents before children. No path or operation-ID sorting.
+        directories.sort_by_key(|record| record.path.components().len());
+        for record in &directories {
+            let parent = resolve_parent(&installer.root, &record.path)?;
+            let leaf = CString::new(parent.leaf()).unwrap();
+            match rustix::fs::mkdirat(parent.as_fd(), leaf.as_c_str(), Mode::from_raw_mode(0o700)) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => return Err(failure(error)),
+            }
+            let fd = rustix::fs::openat(
+                parent.as_fd(),
+                leaf.as_c_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(failure)?;
+            rustix::fs::fchmod(&fd, Mode::from_raw_mode(record.metadata.mode() | 0o700))
                 .map_err(failure)?;
-                rustix::fs::fchmod(&fd, Mode::from_raw_mode(record.metadata.mode() | 0o700))
-                    .map_err(failure)?;
-                self.defer(path, Action::Metadata(record.metadata));
-            }
-            Operation::UpsertFile { record, .. } => {
-                let file = file.expect("checked above");
-                if self.replacing_directory(&path) {
-                    self.defer(path, Action::File(file, record.metadata));
-                } else {
-                    file.install(&self.root, &path, record.metadata)?;
+        }
+        // Independent payloads install in staging-completion order.
+        for (operation, file) in contents {
+            match operation {
+                Operation::UpsertFile { record, .. } => {
+                    file.expect("validated during staging").install(
+                        &installer.root,
+                        &record.path,
+                        record.metadata,
+                    )?;
                 }
+                Operation::UpsertSymlink { record, .. } => installer.symlink(record)?,
+                _ => unreachable!("partitioned above"),
             }
-            Operation::UpsertSymlink { record, .. } => {
-                if self.replacing_directory(&path) {
-                    self.defer(path, Action::Symlink(record));
-                } else {
-                    self.symlink(record)?;
-                }
-            }
+        }
+        // Child installation changes parent mtimes; restore directory metadata last.
+        for record in directories.into_iter().rev() {
+            let parent = resolve_parent(&installer.root, &record.path)?;
+            let leaf = CString::new(parent.leaf()).unwrap();
+            let fd = rustix::fs::openat(
+                parent.as_fd(),
+                leaf.as_c_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(failure)?;
+            set_file_metadata(&File::from(fd), record.metadata)?;
         }
         Ok(())
     }
+}
 
-    /// Called only after PlanEnd and successful completion of all supplied transfers.
-    pub fn finish(mut self) -> Result<(), QuicSyncError> {
-        while !self.pending.is_empty() {
-            self.finish_directory()?;
-        }
-        Ok(())
-    }
+struct Installer {
+    root: RootHandle,
+}
 
-    fn replacing_directory(&self, path: &RelativePath) -> bool {
-        self.pending.last().is_some_and(|directory| {
-            &directory.path == path
-                && directory
-                    .actions
-                    .iter()
-                    .any(|action| matches!(action, Action::Delete))
-        })
-    }
-
-    fn defer(&mut self, path: RelativePath, action: Action) {
-        if let Some(directory) = self.pending.last_mut()
-            && directory.path == path
-        {
-            directory.actions.push(action);
-            return;
-        }
-        self.pending.push(Directory {
-            path,
-            actions: vec![action],
-        });
-    }
-
-    fn finish_directory(&mut self) -> Result<(), QuicSyncError> {
-        let directory = self.pending.pop().expect("checked by caller");
-        for action in directory.actions {
-            match action {
-                Action::Delete => self.unlink(&directory.path, AtFlags::REMOVEDIR)?,
-                Action::File(file, metadata) => {
-                    file.install(&self.root, &directory.path, metadata)?
-                }
-                Action::Symlink(record) => self.symlink(record)?,
-                Action::Metadata(metadata) => {
-                    let parent = resolve_parent(&self.root, &directory.path)?;
-                    let leaf = CString::new(parent.leaf()).unwrap();
-                    let fd = rustix::fs::openat(
-                        parent.as_fd(),
-                        leaf.as_c_str(),
-                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                        Mode::empty(),
-                    )
-                    .map_err(failure)?;
-                    set_file_metadata(&File::from(fd), metadata)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
+impl Installer {
     fn unlink(&self, path: &RelativePath, flags: AtFlags) -> Result<(), QuicSyncError> {
         let parent = resolve_parent(&self.root, path)?;
         let leaf = CString::new(parent.leaf()).unwrap();
