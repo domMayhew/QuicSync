@@ -358,7 +358,7 @@ struct Session {
     transfer_permits: Arc<Semaphore>,
     early_handshake: Mutex<Option<quinn::ZeroRttAccepted>>,
     handshake_accepted: OnceCell<bool>,
-    attempted_early: bool,
+    attempted_early: bool, // TODO: @gpt document this field. Is this only for servers?
 }
 
 impl std::fmt::Debug for Session {
@@ -450,6 +450,9 @@ impl Connection {
             .0
             .handshake_accepted
             .get_or_try_init(|| async {
+                // TODO: @gpt is there a deadlock scenario here? Can two threads try
+                // `get_or_try_init` at the same time and both try to lock `early_handshake`? I
+                // guess the lock wouldn't last forever in that case...
                 let mut handshake = self.0.early_handshake.lock().await;
                 match handshake.as_mut() {
                     Some(handshake) => tokio::select! {
@@ -980,6 +983,8 @@ fn unavailable(diagnostic: impl Into<String>) -> QuicSyncError {
     QuicSyncError::new(ErrorCode::TransportUnavailable, None, diagnostic)
 }
 
+// TODO: @gpt this and the function below are not named in a way that makes it clear they create an
+// error
 fn authentication(diagnostic: impl Into<String>) -> QuicSyncError {
     QuicSyncError::new(
         ErrorCode::AuthenticationFailed,

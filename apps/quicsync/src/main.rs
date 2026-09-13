@@ -14,6 +14,7 @@ async fn main() {
     }
 }
 
+// TODO: @gpt use clap crate
 async fn run() -> Result<(), Box<dyn Error>> {
     let mut args = env::args_os().skip(1);
     let command = args

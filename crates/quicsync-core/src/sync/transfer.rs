@@ -170,8 +170,10 @@ pub async fn send_file(
 pub async fn receive_file(
     stream: TransferStream,
     area: Arc<StagingArea>,
-    id: OperationId,
+    id: OperationId, // TODO: @gpt I thought we did not need OperationIds anymore?
     path: RelativePath,
+    // TODO: @gpt what does this mean? Can we document it? I prefer `is_update` if this is a
+    // descriptor about the operation.
     update: bool,
     limits: &Limits,
 ) -> Result<ReceivedFile, QuicSyncError> {
