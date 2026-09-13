@@ -113,9 +113,36 @@ async fn ignored_children_are_preserved_when_parent_removal_cannot_complete() {
     }
     fs::create_dir(destination.path().join("stale")).unwrap();
     fs::write(destination.path().join("stale/local"), b"preserve").unwrap();
-    assert!(sync(source.path(), destination.path()).await.is_err());
+    let error = sync(source.path(), destination.path()).await.unwrap_err();
+    assert_eq!(
+        error.context().path().unwrap().components(),
+        &[b"stale".to_vec()]
+    );
+    assert!(error.to_string().contains("ignored or protected"));
     assert_eq!(
         fs::read(destination.path().join("stale/local")).unwrap(),
         b"preserve"
+    );
+}
+
+#[tokio::test]
+async fn nested_protected_setup_reports_parent_without_removing_identity() {
+    let source = TempDir::new().unwrap();
+    let destination = TempDir::new().unwrap();
+    fs::create_dir_all(destination.path().join("nix/.quicsync")).unwrap();
+    fs::write(
+        destination.path().join("nix/.quicsync/sentinel"),
+        b"protected",
+    )
+    .unwrap();
+    let error = sync(source.path(), destination.path()).await.unwrap_err();
+    assert_eq!(
+        error.context().path().unwrap().components(),
+        &[b"nix".to_vec()]
+    );
+    assert!(error.to_string().contains("remove \"nix\""));
+    assert_eq!(
+        fs::read(destination.path().join("nix/.quicsync/sentinel")).unwrap(),
+        b"protected"
     );
 }

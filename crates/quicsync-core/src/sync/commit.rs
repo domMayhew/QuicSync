@@ -1,7 +1,7 @@
 //! Filesystem installation after staging, ordered only by filesystem dependencies.
 
 use crate::{
-    error::{ErrorCode, QuicSyncError},
+    error::{ErrorCode, ErrorContext, QuicSyncError},
     filesystem::{
         paths::{RootHandle, resolve_parent},
         staging::{StagedFile, set_file_metadata},
@@ -10,7 +10,7 @@ use crate::{
     types::{EntryKind, IndexRecord, RelativePath},
 };
 use rustix::fs::{AtFlags, Mode, OFlags, Timespec, Timestamps, UTIME_OMIT};
-use std::{ffi::CString, fs::File};
+use std::{ffi::CString, fs::File, os::unix::ffi::OsStringExt, path::PathBuf};
 
 /// In-memory changes retained while transfers stage. Dropping this leaves live paths untouched.
 #[derive(Default)]
@@ -121,7 +121,21 @@ impl Installer {
     fn unlink(&self, path: &RelativePath, flags: AtFlags) -> Result<(), QuicSyncError> {
         let parent = resolve_parent(&self.root, path)?;
         let leaf = CString::new(parent.leaf()).unwrap();
-        rustix::fs::unlinkat(parent.as_fd(), leaf.as_c_str(), flags).map_err(failure)
+        rustix::fs::unlinkat(parent.as_fd(), leaf.as_c_str(), flags).map_err(|error| {
+            let local_path: PathBuf = path
+                .components()
+                .iter()
+                .cloned()
+                .map(std::ffi::OsString::from_vec)
+                .collect();
+            let hint = if error == rustix::io::Errno::NOTEMPTY {
+                "; remaining children may be ignored or protected; they were not removed"
+            } else {
+                ""
+            };
+            failure(format!("remove {local_path:?}: {error}{hint}"))
+                .with_context(ErrorContext::default().with_path(path.clone()))
+        })
     }
 
     fn symlink(&self, record: IndexRecord) -> Result<(), QuicSyncError> {
