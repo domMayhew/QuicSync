@@ -22,9 +22,10 @@ impl From<u64> for OperationId {
     }
 }
 
-/// A BLAKE3 digest.
+/// Whole-file (or symlink-target) BLAKE3 hash used to detect index changes.
+/// Not a transfer-integrity check or a librsync block checksum.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Digest([u8; 32]); // TODO: @gpt We don't need digests for the POC, right?
+pub struct Digest([u8; 32]);
 
 impl Digest {
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {

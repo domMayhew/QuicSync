@@ -294,9 +294,24 @@ async fn cold_then_resumed_notification_runs_two_fresh_syncs() {
             let a = a.unwrap();
             let b = b.unwrap();
             assert_eq!(a.attempted_early_data(), resumed);
-            let (sent, received) = tokio::join!(
+            // Source indexing and serving independently wait on the same gate.
+            // Exercise simultaneous callers for both cold and resumed sessions.
+            let handshake_waiters = async {
+                let mut tasks = tokio::task::JoinSet::new();
+                for connection in [&a, &b] {
+                    for _ in 0..8 {
+                        let connection = connection.clone();
+                        tasks.spawn(async move { connection.confirm_handshake().await });
+                    }
+                }
+                while let Some(result) = tasks.join_next().await {
+                    result.unwrap().unwrap();
+                }
+            };
+            let (sent, received, ()) = tokio::join!(
                 source::run(&a, &p.source_config),
-                destination::serve(&b, &p.destination_config)
+                destination::serve(&b, &p.destination_config),
+                handshake_waiters
             );
             assert!(
                 sent.is_ok() && received.is_ok(),

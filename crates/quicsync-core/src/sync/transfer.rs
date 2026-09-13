@@ -167,18 +167,21 @@ pub async fn send_file(
 }
 
 /// Destination requests content and streams it into private staging.
+///
+/// `id` correlates the in-flight acknowledgment and restores canonical commit
+/// order when parallel transfers finish out of order; it is not a recovery ID.
+/// `is_update` means the destination has a regular-file basis for delta patching.
+/// Otherwise the destination requests whole-file bytes for a new file.
 pub async fn receive_file(
     stream: TransferStream,
     area: Arc<StagingArea>,
-    id: OperationId, // TODO: @gpt I thought we did not need OperationIds anymore?
+    id: OperationId,
     path: RelativePath,
-    // TODO: @gpt what does this mean? Can we document it? I prefer `is_update` if this is a
-    // descriptor about the operation.
-    update: bool,
+    is_update: bool,
     limits: &Limits,
 ) -> Result<ReceivedFile, QuicSyncError> {
     let mut wire = Wire::new(stream, limits)?;
-    wire.send(if update {
+    wire.send(if is_update {
         FileTransfer::UpdateRequest {
             id,
             path: path.clone(),
@@ -190,7 +193,7 @@ pub async fn receive_file(
         }
     })
     .await?;
-    if !update {
+    if !is_update {
         let (tx, rx) = mpsc::channel(QUEUE);
         let worker = tokio::task::spawn_blocking(move || area.receive(Input::new(rx)));
         let receiving = async {

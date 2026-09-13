@@ -205,8 +205,9 @@ async fn dial(
     early: bool,
 ) -> Result<Connection, QuicSyncError> {
     tls.alpn_protocols = vec![ALPN.to_vec()];
-    let crypto = QuicClientConfig::try_from(tls)
-        .map_err(|error| configuration(format!("client TLS is unusable for QUIC: {error}")))?;
+    let crypto = QuicClientConfig::try_from(tls).map_err(|error| {
+        configuration_error(format!("client TLS is unusable for QUIC: {error}"))
+    })?;
     let mut client = quinn::ClientConfig::new(Arc::new(crypto));
     client.transport_config(Arc::new(bounds.tuning()));
 
@@ -216,10 +217,10 @@ async fn dial(
         SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
     };
     let endpoint = Endpoint::client(unspecified)
-        .map_err(|error| unavailable(format!("bind client endpoint: {error}")))?;
+        .map_err(|error| unavailable_error(format!("bind client endpoint: {error}")))?;
     let connecting = endpoint
         .connect_with(client, address, SERVER_NAME)
-        .map_err(|error| unavailable(format!("start connection: {error}")))?;
+        .map_err(|error| unavailable_error(format!("start connection: {error}")))?;
     let connecting = if early {
         match connecting.into_0rtt() {
             Ok((connection, handshake)) => {
@@ -268,13 +269,14 @@ pub fn listen_on(
     cancel: CancellationToken,
 ) -> Result<Listener, QuicSyncError> {
     tls.alpn_protocols = vec![ALPN.to_vec()];
-    let crypto = QuicServerConfig::try_from(tls)
-        .map_err(|error| configuration(format!("server TLS is unusable for QUIC: {error}")))?;
+    let crypto = QuicServerConfig::try_from(tls).map_err(|error| {
+        configuration_error(format!("server TLS is unusable for QUIC: {error}"))
+    })?;
     let mut server = quinn::ServerConfig::with_crypto(Arc::new(crypto));
     server.transport_config(Arc::new(bounds.tuning()));
 
     let endpoint = Endpoint::server(server, address)
-        .map_err(|error| unavailable(format!("bind server endpoint: {error}")))?;
+        .map_err(|error| unavailable_error(format!("bind server endpoint: {error}")))?;
     Ok(Listener {
         endpoint,
         bounds,
@@ -294,7 +296,7 @@ impl Listener {
     pub fn local_address(&self) -> Result<SocketAddr, QuicSyncError> {
         self.endpoint
             .local_addr()
-            .map_err(|error| unavailable(format!("read local address: {error}")))
+            .map_err(|error| unavailable_error(format!("read local address: {error}")))
     }
 
     /// Completes one mutually authenticated handshake.
@@ -311,7 +313,7 @@ impl Listener {
         let incoming =
             guarded_infallible(&self.cancel, "accept connection", self.endpoint.accept())
                 .await?
-                .ok_or_else(|| unavailable("endpoint stopped accepting connections"))?;
+                .ok_or_else(|| unavailable_error("endpoint stopped accepting connections"))?;
         let connecting = incoming
             .accept()
             .map_err(|error| error.describe("accept connection"))?;
@@ -358,7 +360,9 @@ struct Session {
     transfer_permits: Arc<Semaphore>,
     early_handshake: Mutex<Option<quinn::ZeroRttAccepted>>,
     handshake_accepted: OnceCell<bool>,
-    attempted_early: bool, // TODO: @gpt document this field. Is this only for servers?
+    // True only for an outgoing/client connection that attempted TLS 0-RTT.
+    // Incoming/server connections cannot interpret Quinn's acceptance flag.
+    attempted_early: bool,
 }
 
 impl std::fmt::Debug for Session {
@@ -450,9 +454,10 @@ impl Connection {
             .0
             .handshake_accepted
             .get_or_try_init(|| async {
-                // TODO: @gpt is there a deadlock scenario here? Can two threads try
-                // `get_or_try_init` at the same time and both try to lock `early_handshake`? I
-                // guess the lock wouldn't last forever in that case...
+                // OnceCell runs only one initializer at a time. The mutex gives
+                // that initializer mutable access to the handshake future; no
+                // code acquires these locks in reverse order. Cancellation drops
+                // the guard, allowing a later initializer after an error.
                 let mut handshake = self.0.early_handshake.lock().await;
                 match handshake.as_mut() {
                     Some(handshake) => tokio::select! {
@@ -470,7 +475,7 @@ impl Connection {
         if *accepted || !self.0.attempted_early {
             Ok(())
         } else {
-            Err(unavailable(
+            Err(unavailable_error(
                 "early notification rejected; start a fresh sync",
             ))
         }
@@ -482,13 +487,13 @@ impl Connection {
             .0
             .connection
             .peer_identity()
-            .ok_or_else(|| authentication("peer presented no certificate"))?;
+            .ok_or_else(|| authentication_error("peer presented no certificate"))?;
         let certificates = identity
             .downcast::<Vec<CertificateDer<'static>>>()
-            .map_err(|_| authentication("peer identity is not a certificate chain"))?;
+            .map_err(|_| authentication_error("peer identity is not a certificate chain"))?;
         let end_entity = certificates
             .first()
-            .ok_or_else(|| authentication("peer certificate chain is empty"))?;
+            .ok_or_else(|| authentication_error("peer certificate chain is empty"))?;
         Fingerprint::from_certificate_der(end_entity.as_ref())
     }
 
@@ -913,9 +918,9 @@ impl TransportFailure for ConnectionError {
             _ => false,
         };
         if rejected_handshake {
-            return authentication(format!("{action}: peer rejected the TLS handshake"));
+            return authentication_error(format!("{action}: peer rejected the TLS handshake"));
         }
-        unavailable(format!("{action}: {self}"))
+        unavailable_error(format!("{action}: {self}"))
     }
 }
 
@@ -923,7 +928,7 @@ impl TransportFailure for WriteError {
     fn describe(self, action: &str) -> QuicSyncError {
         match self {
             Self::ConnectionLost(error) => error.describe(action),
-            other => unavailable(format!("{action}: {other}")),
+            other => unavailable_error(format!("{action}: {other}")),
         }
     }
 }
@@ -932,7 +937,7 @@ impl TransportFailure for ReadError {
     fn describe(self, action: &str) -> QuicSyncError {
         match self {
             Self::ConnectionLost(error) => error.describe(action),
-            other => unavailable(format!("{action}: {other}")),
+            other => unavailable_error(format!("{action}: {other}")),
         }
     }
 }
@@ -941,14 +946,14 @@ impl TransportFailure for quinn::StoppedError {
     fn describe(self, action: &str) -> QuicSyncError {
         match self {
             Self::ConnectionLost(error) => error.describe(action),
-            other => unavailable(format!("{action}: {other}")),
+            other => unavailable_error(format!("{action}: {other}")),
         }
     }
 }
 
 impl TransportFailure for ClosedStream {
     fn describe(self, action: &str) -> QuicSyncError {
-        unavailable(format!("{action}: {self}"))
+        unavailable_error(format!("{action}: {self}"))
     }
 }
 
@@ -979,13 +984,11 @@ fn cancelled(action: &str) -> QuicSyncError {
     )
 }
 
-fn unavailable(diagnostic: impl Into<String>) -> QuicSyncError {
+fn unavailable_error(diagnostic: impl Into<String>) -> QuicSyncError {
     QuicSyncError::new(ErrorCode::TransportUnavailable, None, diagnostic)
 }
 
-// TODO: @gpt this and the function below are not named in a way that makes it clear they create an
-// error
-fn authentication(diagnostic: impl Into<String>) -> QuicSyncError {
+fn authentication_error(diagnostic: impl Into<String>) -> QuicSyncError {
     QuicSyncError::new(
         ErrorCode::AuthenticationFailed,
         Some(Phase::Handshake),
@@ -993,6 +996,6 @@ fn authentication(diagnostic: impl Into<String>) -> QuicSyncError {
     )
 }
 
-fn configuration(diagnostic: impl Into<String>) -> QuicSyncError {
+fn configuration_error(diagnostic: impl Into<String>) -> QuicSyncError {
     QuicSyncError::new(ErrorCode::InvalidConfiguration, None, diagnostic)
 }
