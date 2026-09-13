@@ -42,17 +42,24 @@ Available limits are `max_frame_bytes`, `max_path_bytes`, `max_components`,
 
 ## Running the POC
 
-Run `quicsync init SOURCE_ROOT` and `quicsyncd init SETUP_ROOT` to create
+Run `quicsync init` from the source directory and `quicsyncd init` from
+the destination directory (on the destination host) to create
 private identities and print the compact fingerprints used in the configuration.
 Create the TOML files above with mode `0600`; initialization does not generate
 configuration or exchange pins automatically.
 
-Start `quicsyncd serve SETUP_ROOT`, then run `quicsync sync SOURCE_ROOT`.
+From the destination directory, start `quicsyncd serve`. Then run
+`quicsync sync` from the source directory. All commands default to the current
+directory; an optional explicit directory argument is also supported.
+For a destination rooted in its setup directory, use `path = "."`.
+For remote hosts, set the source's `destination` to the destination host's
+reachable address and allow UDP on the configured port. A loopback address
+only works when both processes run on the same host.
 The daemon handles one attempt at a time; indexing, planning, transfer, and
 staging within that attempt run concurrently. It continues accepting fresh
 attempts after an error. Neither peer retries a failed attempt automatically.
 
-For repeated manual measurements, use `quicsync interactive SOURCE_ROOT`.
+For repeated manual measurements, use `quicsync interactive` in the source directory.
 Each Enter starts a fresh sync; EOF exits. The process retains TLS session
 tickets in memory so subsequent notifications can use 0-RTT. A new one-shot
 process starts cold; tickets are not persisted to disk. Rejected early data
